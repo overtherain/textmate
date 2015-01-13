@@ -1,7 +1,13 @@
 #import "OakImageAndTextCell.h"
-#import "NSImage Additions.h"
 
 @implementation OakImageAndTextCell
+{
+	NSImage* _image;
+}
+
+- (NSImage*)image                  { return _image; }
+- (void)setImage:(NSImage*)anImage { _image = anImage; }
+
 - (id)copyWithZone:(NSZone*)zone
 {
 	OakImageAndTextCell* cell = [super copyWithZone:zone];
@@ -55,7 +61,7 @@
 			[[self backgroundColor] set];
 			NSRectFill(imageRect);
 		}
-		[self.image drawAdjustedInRect:imageRect fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];
+		[self.image drawInRect:imageRect fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1 respectFlipped:YES hints:nil];
 	}
 
 	[super drawWithFrame:[self textFrameWithFrame:cellFrame inControlView:controlView] inView:controlView];
@@ -72,7 +78,7 @@
 {
 	NSRect imageRect = [self imageFrameWithFrame:cellFrame inControlView:controlView];
 	NSRect textRect  = [self textFrameWithFrame:cellFrame inControlView:controlView];
-	NSPoint point    = [controlView convertPoint:([event window] ? [event locationInWindow] : [[controlView window] convertScreenToBase:[event locationInWindow]]) fromView:nil];
+	NSPoint point    = [controlView convertPoint:([event window] ? [event locationInWindow] : [[controlView window] convertRectFromScreen:(NSRect){ [event locationInWindow], NSZeroSize }].origin) fromView:nil];
 
 	NSUInteger res = NSCellHitContentArea;
 	if(NSMouseInRect(point, imageRect, controlView.isFlipped))

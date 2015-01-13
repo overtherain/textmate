@@ -42,8 +42,8 @@ def create_release(path, repository, tag, description, content_type)
   basename = File::basename(path)
   payload = { 'name' => name, 'tag_name' => tag, 'draft' => false, 'prerelease' => true }
   payload['body'] = description unless description.nil?
-  open("|curl -snd '#{payload.to_json}' https://api.github.com/repos/#{repository}/releases") do |io|
-    github = JSON.parse(io.read)
+  open("|curl -snd '#{payload.to_json}' https://api.github.com/repos/#{repository}/releases") do |response|
+    github = JSON.parse(response.read)
 
     if github.include?('errors')
       err = github['errors'].first
@@ -106,9 +106,10 @@ if __FILE__ == $PROGRAM_NAME
   abort "No tag specified"        if tag.nil?
 
   if path = ARGV.shift
+    signature = sign_file(path, keyfile, netinfo.password)
     info = base_info.merge({
       'url'       => create_release(path, destination, tag, description, 'application/x-bzip2'),
-      'signature' => sign_file(path, keyfile, netinfo.password),
+      'signature' => signature,
       'signee'    => netinfo.login
     })
     STDOUT << info.to_json

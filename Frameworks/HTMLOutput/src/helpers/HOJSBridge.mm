@@ -2,7 +2,6 @@
 #import "add_to_buffer.h"
 #import <OakFoundation/NSString Additions.h>
 #import <oak/debug.h>
-#import <OakFoundation/NSArray Additions.h>
 #import <document/collection.h>
 #import <text/utf8.h>
 #import <ns/ns.h>
@@ -16,7 +15,7 @@
 	This class exposes a ‘TextMate’ object to the JavaScript interpreter.
 	The object will have the following methods available:
 
-		system()                 See HOJSShellCommand.mm for information.
+		system()                 See HOJSShellCommand class below for information.
 		log(msg)                 Adds a message to the system console (using NSLog).
 		open(path, options)      Opens a file on disk as a document in the current application.
 		                         options may be either a selection range string or a (line) number.
@@ -86,7 +85,7 @@ OAK_DEBUG_VAR(HTMLOutput_JSBridge);
 
 - (double)progress
 {
-	return [_delegate progress];
+	return [(id <HOJSBridgeDelegate>)_delegate progress];
 }
 
 - (void)log:(NSString*)aMessage
@@ -100,7 +99,7 @@ OAK_DEBUG_VAR(HTMLOutput_JSBridge);
 	if([options isKindOfClass:[NSNumber class]])
 		range = text::pos_t([options intValue]-1, 0);
 	else if([options isKindOfClass:[NSString class]])
-		range = to_s((NSString*)options);
+		range = to_s(options);
 	document::show(document::create(to_s(path)), document::kCollectionAny, range);
 }
 

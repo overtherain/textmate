@@ -2,6 +2,98 @@ Title: Release Notes
 
 # Changes
 
+## 2014-11-29 (v2.0-beta.6.4)
+
+* TextMate now supports the system’s “press and hold” feature to bring up variations of the pressed character (mainly decorated with accents).
+* See [all changes since v2.0-beta.6.1](https://github.com/textmate/textmate/compare/v2.0-beta.6.1...v2.0-beta.6.4).
+
+## 2014-11-11 (v2.0-beta.6.1)
+
+* The bundle item chooser (⌃⌘T) now show the value of settings and variables (inline) and includes actions from key binding dictionaries (like `~/Library/KeyBindings/DefaultKeyBinding.dict`).
+* See [all changes since v2.0-beta.5.4](https://github.com/textmate/textmate/compare/v2.0-beta.5.4...v2.0-beta.6.1).
+
+## 2014-11-05 (v2.0-beta.5.4)
+
+* Improve stability on Yosemite.
+* The chooser windows (⌘T, ⇧⌘O, etc.) are now view-based and thus a bit more fancy. Consider it work-in-progress.
+* See [all changes since v2.0-beta.5](https://github.com/textmate/textmate/compare/v2.0-beta.5...v2.0-beta.5.4).
+
+## 2014-10-29 (v2.0-beta.5)
+
+* Items in the bundle editor now have a context menu with “Show in Finder”. For items with local changes, this item turns into a submenu, showing all the location of the item.
+* Closing stale tabs when the tab bar overflows can be disabled using `defaults write com.macromates.TextMate.preview disableTabAutoClose -bool YES`.
+* Swapped key equivalents of _“New File”_ and _“New Folder”_ actions to make it somewhat consistent with Finder.
+* See [all changes since v2.0-beta.3](https://github.com/textmate/textmate/compare/v2.0-beta.3...v2.0-beta.5).
+
+## 2014-10-20 (v2.0-beta.3)
+
+* It’s now possible to associate a string value with marks using: `"$TM_MATE" --set-mark «mark»:«value»`. The value is shown if you click the gutter image. You can also use `--clear-mark` together with `--set-mark`. This avoids the potential flash that would show if having to call `mate` twice to update marks.
+* New default gutter image: `note`.
+* See [all changes since v2.0-beta.1](https://github.com/textmate/textmate/compare/v2.0-beta.1...v2.0-beta.3).
+
+## 2014-10-16 ([v2.0-beta.1](https://github.com/textmate/textmate/compare/v2.0-alpha.9575...v2.0-beta.1))
+
+* Bump version number from alpha to beta.
+
+## 2014-10-15 ([v2.0-alpha.9575](https://github.com/textmate/textmate/compare/v2.0-alpha.9573...v2.0-alpha.9575))
+
+* You can now set and clear gutter marks via `mate` using the new `--set-mark` and `--clear-mark` options. The name of the mark should be one of the predefined images which currently are: `bookmark`, `error`, `warning`, and `search`. The first one is what is used for bookmarks (and if using it, you are changing the document’s bookmarks). Alternatively one can specify a full path, which should point to the image used for the mark. Ideally this should be in PDF format since the size of the gutter images is not fixed. For an example see the [Git Diff Gutter bundle](https://github.com/textmate/git-diff-gutter.tmbundle) which adds gutter marks for added/modified lines (on save). This bundle can also be installed from _Bundles → Preferences_. Another example is the `TextMate::Executor` support library which now add warning and error badges, see [this commit](https://github.com/textmate/bundle-support.tmbundle/commit/bfd2e332aef8b77ba5c33999eda1dc110595f15e).
+* The possible values for `scmStatus` are now: `enable`, `enableIfSystemDisk`, `enableIfLocalDisk` (default), and `disable`. *[Ryan Goulden]*
+
+## 2014-10-10 ([v2.0-alpha.9573](https://github.com/textmate/textmate/compare/v2.0-alpha.9567...v2.0-alpha.9573))
+
+* When replacing after a folder search, files that are not open will have the replacements done “on disk”. There is currently no undo for this action so think twice before making massive replacements to files not under version control.
+* You can now set default options for `mate` via the `MATEFLAGS` environment variable. I didn’t bump the version of `mate` so you need to manually go to Preferences → Terminal and click uninstall/install to update.
+* Miscellaneous fixes and improvements.
+
+## 2014-09-26 ([v2.0-alpha.9567](https://github.com/textmate/textmate/compare/v2.0-alpha.9565...v2.0-alpha.9567))
+
+* Miscellaneous fixes and a new tab bar view that currently resemble Safari’s (from 10.9) but the groundwork has been done for easier styling to support different themes. The “Show tab for single document” setting in preferences now (when disabled) causes the tab bar to be initially hidden, but once shown, it will stay visible (to avoid content from jumping each time switching between one and two tabs), so I recommend disabling this setting (which is the new default).
+
+## 2014-09-17 ([v2.0-alpha.9565](https://github.com/textmate/textmate/compare/v2.0-alpha.9563...v2.0-alpha.9565))
+
+* If you typeset TeX from TextMate (⌘R) and have the resulting PDF show in TextMate’s (HTML) output window (default) you can use ⌘P to bring up the print dialog to print the PDF. This used to work, but presumably broke during the update to 10.9, after which one had to first click the PDF to give it focus, before ⌘P would work.
+* Items from `.tm_properties` are now shown in the bundle item chooser (under settings). Eclipsed settings/variables are shown with an overstrike, although in practice the effective value may be derived from multiple eclipsed ones, e.g. in the case of updating `PATH` to `$HOME/bin:$PATH`. Long-term the expanded and non-expanded values should also be shown in this window.
+* If you hold option (⌥) when using the (new) remove button to prune folder search results then the glob will be extended to exclude the undesired path, so that future searches exclude it by default.
+* Some new folder search options added to the gear menu in the folder search window.
+* The `${«var»:/asciify}` format string/snippet transformation now does a better job at stripping diacritics and combining marks.
+* Fixes and improvements.
+
+## 2014-09-02 ([v2.0-alpha.9563](https://github.com/textmate/textmate/compare/v2.0-alpha.9559...v2.0-alpha.9563))
+
+* Folder search results can be pruned using the new remove button shown per file in the list. You can also see how many bytes were searched by clicking the status bar (after a folder search).
+* The bundle item chooser now use a scope bar for the 3 item types it can show. You can move between sources via ⌘{ and ⌘}. The _Settings_ source currently shows settings from bundle items but long-term it should also show settings set via `.tm_properties` or from the settings window. The _Other_ source is currently language grammars and themes but might become _Styles_ with a more fine-grained view of what rules/themes are responsible for the current context.
+* The commit window is now a document modal sheet with the list of items to commit hidden by default. The intent is that one should select the items to commit in the file browser, here the Go → SCM Status (⇧⌘Y) is highly recommended. *[Ronald Wampler]*
+* Files opened via `mate` are now added to the recent menu by default unless the file is a dot-file (hidden), `--wait` or `--no-recent` is specified, or the file is in the system’s temporary folder. Also cleaned up the command options a bit, e.g. `--async` is now `--no-wait`, run `mate -h` for more info.
+* Improved _Text → Titlecase Line / Selection_: Words with mixed case will not be changed and any prefix/suffix that is not a word, will be ignored so that the actual first/last word gets titlecased.
+* When a key equivalent field has focus (and is not recording), escape will now clear the field.
+
+## 2014-08-17 ([v2.0-alpha.9559](https://github.com/textmate/textmate/compare/v2.0-alpha.9555...v2.0-alpha.9559))
+
+* The bundle item chooser (⌃⌘T) now include menu items. This also works with key equivalent searching.
+* In the chooser lists (fuzzy file finder, bundle item chooser, and symbol list) it is now possible to make the selection loop around, that is, move from first to last item with arrow up, etc. This is enabled by running: `defaults write com.macromates.TextMate.preview enableLoopFilterList -bool YES` *[Zete Lui]*
+
+## 2014-07-31 ([v2.0-alpha.9555](https://github.com/textmate/textmate/compare/v2.0-alpha.9551...v2.0-alpha.9555))
+
+* Showing invisible characters will (again) show spaces. As mentioned previously the way to control which glyphs are used are done using the `invisiblesMap` option in `.tm_properties`. Add either `\n`, `\t`, or a space to the string, followed by the glyph that should be used to render the character, or prefix it with `~` to disable rendering of that character. For example to disable rendering of spaces and render tabs as `┊` add this to `.tm_properties`: `invisiblesMap = "~ \t┊"`. *[Steven Clukey]*
+* QuickLook generator will now handle thumbnail generation. *[Nyx0uf]*
+* The bundle item chooser (⌃⌘T) have some new search capabilities, look in its drop-down menu, though still work in progress.
+* Accessibility improvements for the bundle item chooser and key equivalent recorder. *[Boris Dušek]*
+* Previously using ⌘F with a multiline selection would set the _in_ pop-up to _Document_ (unless `findInSelectionByDefault` was set). This is no longer the case, but can be brought back by running: `defaults write alwaysFindInDocument -bool YES`. *[Jeremy Whitlock]*
+* Fixed issue where having the find or HTML output window open in another space and switching focus to TextMate, would bring the window to the active space, rather than switch to TextMate’s space. *[Etienne Samson]*
+
+## 2014-07-12 ([v2.0-alpha.9551](https://github.com/textmate/textmate/compare/v2.0-alpha.9549...v2.0-alpha.9551))
+
+* Reworked the bundle item chooser window. This is work in progress.
+
+## 2014-07-06 ([v2.0-alpha.9549](https://github.com/textmate/textmate/compare/v2.0-alpha.9547...v2.0-alpha.9549))
+
+* TextMate now works with the [Haskell Ligature font](https://github.com/i-tu/Hasklig). If you are using the Mensch font and see `fi` drawn as `ﬁ` then update to [Mensch version 2.0](http://robey.lag.net/2012/08/22/mensch-2.html).
+* You can now use ⌘{ and ⌘} in the file and favorites chooser to cycle between sources. These keys can also be used in Preferences, the About window, and the Find in Folder (to cycle through files with matches). In these windows you can also use ⌘1-⌘n for the n’th “source” (but this is not new).
+* Draw properly rounded corners for tabs on retina displays. *[Adam Strzelecki]*
+* Improve VoiceOver feedback for file and favorite choosers when running on 10.10. *[Boris Dušek]*
+* Visual changes/improvements: tab overflow menu has document icons, the icon for it has multiple states (retina), the variables and bundles list in Preferences now use a smaller font and the latter has a search field to filter the list. *[Ronald Wampler]*
+
 ## 2014-05-18 ([v2.0-alpha.9547](https://github.com/textmate/textmate/compare/v2.0-alpha.9545...v2.0-alpha.9547))
 
 * Fix bug where the `PATH` variable would contain a trailing zero byte and thus everything appended to it was ignored.

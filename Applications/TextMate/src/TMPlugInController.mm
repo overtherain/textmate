@@ -1,5 +1,10 @@
 #import "TMPlugInController.h"
+#import <OakFoundation/NSFileManager Additions.h>
+#import <OakAppKit/NSAlert Additions.h>
 #import <OakSystem/application.h>
+#import <crash/info.h>
+#import <io/path.h>
+#import <ns/ns.h>
 #import <oak/debug.h>
 
 OAK_DEBUG_VAR(PlugInController);
@@ -57,8 +62,26 @@ static id CreateInstanceOfPlugInClass (Class cl, TMPlugInController* controller)
 		{
 			if([[bundle objectForInfoDictionaryKey:@"TMPlugInAPIVersion"] intValue] == kPlugInAPIVersion)
 			{
+				std::string const crashedDuringPlugInLoad = path::join(path::temp(), "load_" + to_s(identifier));
+				if(path::exists(crashedDuringPlugInLoad))
+				{
+					NSAlert* alert = [NSAlert tmAlertWithMessageText:[NSString stringWithFormat:@"Move “%@” plug-in to Trash?", name ?: identifier] informativeText:@"Previous attempt of loading the plug-in caused abnormal exit. Would you like to move it to trash?" buttons:@"Move to Trash", @"Cancel", @"Skip Loading", nil];
+					NSInteger choice = [alert runModal];
+					if(choice == NSAlertFirstButtonReturn) // "Move to Trash"
+						[[NSFileManager defaultManager] tmTrashItemAtURL:[NSURL fileURLWithPath:aPath] resultingItemURL:nil error:nil];
+
+					if(choice != NSAlertThirdButtonReturn) // "Skip Loading"
+						unlink(crashedDuringPlugInLoad.c_str());
+
+					if(choice != NSAlertSecondButtonReturn) // "Cancel"
+						return;
+				}
+
+				path::set_content(crashedDuringPlugInLoad, "");
+
 				if([bundle load])
 				{
+					crash_reporter_info_t crashInfo("bad plug-in: " + to_s(identifier));
 					if(id instance = CreateInstanceOfPlugInClass([bundle principalClass], self))
 					{
 						self.loadedPlugIns[identifier] = instance;
@@ -72,6 +95,8 @@ static id CreateInstanceOfPlugInClass (Class cl, TMPlugInController* controller)
 				{
 					NSLog(@"Failed to load plug-in: %@, path %@", name ?: identifier, aPath);
 				}
+
+				unlink(crashedDuringPlugInLoad.c_str());
 			}
 			else
 			{

@@ -12,21 +12,61 @@ namespace ng
 	// = context_t =
 	// =============
 
-	context_t::context_t (CGContextRef context, CGImageRef spellingDot, std::function<CGImageRef(double, double)> foldingDotsFactory) : _context(context), _spelling_dot(spellingDot), _folding_dots_create(foldingDotsFactory)
+	context_t::context_t (CGContextRef context, std::string const& invisibleMap, CGImageRef spellingDot, std::function<CGImageRef(double, double)> foldingDotsFactory) : _context(context), _spelling_dot(spellingDot), _folding_dots_create(foldingDotsFactory)
 	{
 		if(_spelling_dot)
 			CFRetain(_spelling_dot);
+		setup_invisibles_mapping(invisibleMap == NULL_STR ? "~ ~\t~\n" : invisibleMap);
 	}
 
 	context_t::~context_t ()
 	{
 		if(_spelling_dot)
-			CFRelease(_spelling_dot);
+			CGImageRelease(_spelling_dot);
 
 		for(auto const& pair : _folding_dots_cache)
 		{
 			if(pair.second)
-				CFRelease(pair.second);
+				CGImageRelease(pair.second);
+		}
+	}
+
+	void context_t::setup_invisibles_mapping (std::string const& str)
+	{
+		enum state_t { kWaiting, kExclude, kSpace, kTab, kNewline } state = kWaiting;
+		for(auto ch : diacritics::make_range(str.data(), str.data() + str.size()))
+		{
+			if(state == kWaiting)
+			{
+				switch(ch)
+				{
+					case '~':  state = kExclude; break;
+					case ' ':  state = kSpace;   break;
+					case '\t': state = kTab;     break;
+					case '\n': state = kNewline; break;
+				}
+			}
+			else
+			{
+				switch(state)
+				{
+					case kExclude:
+					{
+						switch(ch)
+						{
+							case ' ':  _space   = ""; break;
+							case '\t': _tab     = ""; break;
+							case '\n': _newline = ""; break;
+						}
+					}
+					break;
+
+					case kSpace:   _space   = utf8::to_s(ch); break;
+					case kTab:     _tab     = utf8::to_s(ch); break;
+					case kNewline: _newline = utf8::to_s(ch); break;
+				}
+				state = kWaiting;
+			}
 		}
 	}
 
@@ -102,7 +142,7 @@ namespace ct
 	// = line_t =
 	// ==========
 
-	line_t::line_t (std::string const& text, std::map<size_t, scope::scope_t> const& scopes, theme_ptr const& theme, CGColorRef textColor) : _text(text)
+	line_t::line_t (std::string const& text, std::map<size_t, scope::scope_t> const& scopes, theme_ptr const& theme, size_t tabSize, ct::metrics_t const& metrics, CGColorRef textColor) : _text(text)
 	{
 		ASSERT(utf8::is_valid(text.begin(), text.end()));
 		ASSERT(scopes.empty() || (--scopes.end())->first <= text.size());
@@ -135,7 +175,6 @@ namespace ct
 						CFAttributedStringReplaceString(str, CFRangeMake(0, 0), cfStr);
 						CFAttributedStringSetAttribute(str, CFRangeMake(0, CFAttributedStringGetLength(str)), kCTFontAttributeName, styles.font());
 						CFAttributedStringSetAttribute(str, CFRangeMake(0, CFAttributedStringGetLength(str)), kCTForegroundColorAttributeName, textColor ?: styles.foreground());
-						CFAttributedStringSetAttribute(str, CFRangeMake(0, CFAttributedStringGetLength(str)), kCTLigatureAttributeName, cf::wrap(0));
 						if(styles.underlined())
 							_underlines.push_back(std::make_pair(CFRangeMake(CFAttributedStringGetLength(toDraw), CFAttributedStringGetLength(str)), CGColorPtr(CGColorRetain(styles.foreground()), CGColorRelease)));
 						_backgrounds.push_back(std::make_pair(CFRangeMake(CFAttributedStringGetLength(toDraw), CFAttributedStringGetLength(str)), CGColorPtr(CGColorRetain(styles.background()), CGColorRelease)));
@@ -149,7 +188,56 @@ namespace ct
 					fprintf(stderr, "%s: failed to create CFString for ‘%.*s’\n", getprogname(), int(j - i), text.data() + i);
 				}
 			}
+
 			_line.reset(CTLineCreateWithAttributedString(toDraw), CFRelease);
+			CGFloat tabWidth = tabSize * metrics.column_width();
+			CGFloat standardTabWidths = 0;
+			CGFloat newTabWidths = 0;
+			CFIndex j = 0;
+			std::vector<CTTextTabRef> tabs;
+			for(size_t i = 0; i < text.size(); ++i)
+			{
+				switch(text[i])
+				{
+					case ' ':
+						_space_locations.push_back(i);
+					break;
+
+					case '\t':
+						j += utf16::distance(text.data() + (_tab_locations.empty() ? 0 : _tab_locations.back()), text.data() + i);
+
+						CGFloat x = CTLineGetOffsetForStringIndex(_line.get(), j, NULL);
+						CGFloat newX = (x - standardTabWidths + newTabWidths);
+						CGFloat stopLocation = (floor(newX / tabWidth)+1) * tabWidth;
+						if(stopLocation - newX < metrics.column_width()*0.5)
+							stopLocation += tabWidth;
+						newTabWidths += stopLocation - newX;
+						standardTabWidths += CTLineGetOffsetForStringIndex(_line.get(), j+1, NULL) - x;
+						tabs.push_back(CTTextTabCreate(kCTNaturalTextAlignment, stopLocation, NULL));
+						_tab_locations.push_back(i);
+					break;
+				}
+			}
+
+			if(!tabs.empty())
+			{
+				if(CFArrayRef tabStops = CFArrayCreate(kCFAllocatorDefault, (const void**) (&tabs[0]), tabs.size(), &kCFTypeArrayCallBacks))
+				{
+					CTParagraphStyleSetting settings[] = {
+						{ kCTParagraphStyleSpecifierTabStops,           sizeof(CFArrayRef), &tabStops },
+						{ kCTParagraphStyleSpecifierDefaultTabInterval, sizeof(tabWidth),   &tabWidth }
+					};
+					if(CTParagraphStyleRef paragraphStyle = CTParagraphStyleCreate(settings, sizeofA(settings)))
+					{
+						CFAttributedStringSetAttribute(toDraw, CFRangeMake(0, CFAttributedStringGetLength(toDraw)), kCTParagraphStyleAttributeName, paragraphStyle);
+						_line.reset(CTLineCreateWithAttributedString(toDraw), CFRelease);
+						CFRelease(paragraphStyle);
+					}
+					CFRelease(tabStops);
+				}
+				std::for_each(tabs.begin(), tabs.end(), CFRelease);
+			}
+
 			CFRelease(toDraw);
 		}
 	}
@@ -182,10 +270,42 @@ namespace ct
 		}
 	}
 
-	void line_t::draw_foreground (CGPoint pos, ng::context_t const& context, bool isFlipped, std::vector< std::pair<size_t, size_t> > const& misspelled) const
+	void line_t::draw_invisible (std::vector<size_t> locations, CGPoint pos, std::string const& text, styles_t const& styles, ng::context_t const& context, bool isFlipped) const
+	{
+		CFMutableAttributedStringRef str = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0);
+		CFAttributedStringReplaceString(str, CFRangeMake(0, 0), cf::wrap(text));
+		CFAttributedStringSetAttribute(str, CFRangeMake(0, CFAttributedStringGetLength(str)), kCTFontAttributeName, styles.font());
+		CFAttributedStringSetAttribute(str, CFRangeMake(0, CFAttributedStringGetLength(str)), kCTForegroundColorAttributeName, styles.foreground());
+		CTLineRef line = CTLineCreateWithAttributedString(str);
+		CFRelease(str);
+		CGContextSaveGState(context);
+		if(isFlipped)
+			CGContextConcatCTM(context, CGAffineTransformMake(1, 0, 0, -1, 0, 2 * pos.y));
+
+		for(auto const& location : locations)
+		{
+			if(location > 5000)
+				break;
+
+			CGFloat x1 = round(pos.x + offset_for_index(location));
+			CGFloat x2 = round(pos.x + offset_for_index(location+1));
+			CGFloat x = x2 < x1 ? x1 - CTLineGetTypographicBounds(line, NULL, NULL, NULL) : x1;
+			CGContextSetTextPosition(context, x, pos.y);
+			CTLineDraw(line, context);
+		}
+		CGContextRestoreGState(context);
+		CFRelease(line);
+	}
+
+	void line_t::draw_foreground (CGPoint pos, ng::context_t const& context, bool isFlipped, std::vector< std::pair<size_t, size_t> > const& misspelled, theme_ptr const& theme) const
 	{
 		if(!_line)
 			return;
+
+		if(context.space() != "")
+			draw_invisible(_space_locations, pos, context.space(), theme->styles_for_scope("deco.invisible.space"), context, isFlipped);
+		if(context.tab() != "")
+			draw_invisible(_tab_locations, pos, context.tab(), theme->styles_for_scope("deco.invisible.tab"), context, isFlipped);
 
 		for(auto const& pair : _underlines) // Draw our own underline since CoreText does an awful job <rdar://5845224>
 		{

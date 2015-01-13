@@ -1,27 +1,29 @@
 #import "Find.h"
+#import "FFResultNode.h"
 #import "FindWindowController.h"
+#import "FFResultsViewController.h"
 #import "FFDocumentSearch.h"
 #import "Strings.h"
-#import "attr_string.h"
-#import "FFFilePathCell.h"
 #import <OakFoundation/OakFindProtocol.h>
-#import <OakFoundation/NSArray Additions.h>
 #import <OakFoundation/NSString Additions.h>
+#import <OakAppKit/NSAlert Additions.h>
 #import <OakAppKit/OakAppKit.h>
 #import <OakAppKit/OakPasteboard.h>
+#import <OakAppKit/OakUIConstructionFunctions.h>
 #import <ns/ns.h>
 #import <text/types.h>
 #import <text/utf8.h>
 #import <regexp/format_string.h>
 #import <editor/editor.h>
 #import <document/collection.h>
-#import "Strings.h"
 
 OAK_DEBUG_VAR(Find_Base);
 
 NSString* const FFSearchInDocument  = @"FFSearchInDocument";
 NSString* const FFSearchInSelection = @"FFSearchInSelection";
 NSString* const FFSearchInOpenFiles = @"FFSearchInOpenFiles";
+
+static std::string const kSearchMarkIdentifier = "search";
 
 enum FindActionTag
 {
@@ -32,12 +34,27 @@ enum FindActionTag
 	FindActionReplaceAll,
 	FindActionReplaceAndFind,
 	FindActionReplaceSelected,
+	FindActionReplace,
 };
 
-@interface Find () <NSOutlineViewDataSource, NSOutlineViewDelegate>
+@interface Find () <OakFindServerProtocol>
 @property (nonatomic) FindWindowController* windowController;
 @property (nonatomic) FFDocumentSearch* documentSearch;
+@property (nonatomic) FFResultNode* results;
+@property (nonatomic) NSUInteger countOfMatches;
+@property (nonatomic) NSUInteger countOfExcludedMatches;
 @property (nonatomic) BOOL closeWindowOnSuccess;
+@property (nonatomic) BOOL performingFolderSearch;
+
+// =========================
+// = OakFindProtocolServer =
+// =========================
+
+@property (nonatomic) find_operation_t findOperation;
+@property (nonatomic) find::options_t  findOptions;
+
+- (void)didFind:(NSUInteger)aNumber occurrencesOf:(NSString*)aFindString atPosition:(text::pos_t const&)aPosition wrapped:(BOOL)didWrap;
+- (void)didReplace:(NSUInteger)aNumber occurrencesOf:(NSString*)aFindString with:(NSString*)aReplacementString;
 @end
 
 NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
@@ -53,15 +70,25 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 {
 	if(!_windowController)
 	{
-		self.windowController = [FindWindowController new];
-		self.windowController.nextResponder = self;
-		self.windowController.resultsOutlineView.action       = @selector(didSingleClickResultsOutlineView:);
-		self.windowController.resultsOutlineView.doubleAction = @selector(didDoubleClickResultsOutlineView:);
-		self.windowController.resultsOutlineView.target       = self;
-		self.windowController.resultsOutlineView.dataSource   = self;
-		self.windowController.resultsOutlineView.delegate     = self;
+		_windowController = [FindWindowController new];
+		_windowController.nextResponder = self;
+
+		_windowController.resultsViewController.selectResultAction      = @selector(didSelectResult:);
+		_windowController.resultsViewController.removeResultAction      = @selector(didRemoveResult:);
+		_windowController.resultsViewController.doubleClickResultAction = @selector(didDoubleClickResult:);
+		_windowController.resultsViewController.target                  = self;
+
+		[_windowController.replaceAllButton bind:@"title" toObject:self withKeyPath:@"replaceAllButtonTitle" options:nil];
+		[_windowController.replaceAllButton bind:@"enabled2" toObject:self withKeyPath:@"canReplaceAll" options:nil];
+
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowWillClose:) name:NSWindowWillCloseNotification object:_windowController.window];
 	}
 	return _windowController;
+}
+
+- (void)windowWillClose:(NSNotification*)aNotification
+{
+	[self stopSearch:self];
 }
 
 // ====================================
@@ -71,11 +98,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 - (void)showFindWindowFor:(NSString*)searchScope
 {
 	self.windowController.searchIn = searchScope;
-	[self updateActionButtons:self];
 	[self.windowController showWindow:self];
-
-	if(_documentSearch && _documentSearch.windowControllers.count == 0)
-		[_documentSearch addWindowController:self.windowController];
 }
 
 - (IBAction)showFolderSelectionPanel:(id)sender
@@ -108,22 +131,11 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 // = Find actions =
 // ================
 
-- (void)updateActionButtons:(id)sender
-{
-	NSString* replaceAllTitle = @"Replace All";
-	BOOL replaceAllEnabled = YES;
++ (NSSet*)keyPathsForValuesAffectingCanReplaceAll         { return [NSSet setWithArray:@[ @"countOfMatches", @"countOfExcludedMatches", @"windowController.showsResultsOutlineView" ]]; }
++ (NSSet*)keyPathsForValuesAffectingReplaceAllButtonTitle { return [NSSet setWithArray:@[ @"countOfMatches", @"countOfExcludedMatches", @"windowController.showsResultsOutlineView" ]]; }
 
-	if(self.windowController.showsResultsOutlineView)
-	{
-		if(_documentSearch.countOfSelectedMatches < _documentSearch.countOfMatches)
-			replaceAllTitle = @"Replace Selected";
-		if(_documentSearch.hasPerformedReplacement)
-			replaceAllEnabled = NO;
-	}
-
-	self.windowController.replaceAllButton.title   = replaceAllTitle;
-	self.windowController.replaceAllButton.enabled = replaceAllEnabled;
-}
+- (BOOL)canReplaceAll                { return _windowController.showsResultsOutlineView ? (_countOfExcludedMatches < _countOfMatches) : YES; }
+- (NSString*)replaceAllButtonTitle   { return _windowController.showsResultsOutlineView && _countOfExcludedMatches && self.canReplaceAll ? @"Replace Selected" : @"Replace All"; }
 
 - (IBAction)countOccurrences:(id)sender   { [self performFindAction:FindActionCountMatches   withWindowController:self.windowController]; }
 - (IBAction)findAll:(id)sender            { [self performFindAction:FindActionFindAll        withWindowController:self.windowController]; }
@@ -132,18 +144,15 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 - (IBAction)findPrevious:(id)sender       { [self performFindAction:FindActionFindPrevious   withWindowController:self.windowController]; }
 - (IBAction)replaceAll:(id)sender         { [self performFindAction:FindActionReplaceAll     withWindowController:self.windowController]; }
 - (IBAction)replaceAndFind:(id)sender     { [self performFindAction:FindActionReplaceAndFind withWindowController:self.windowController]; }
+- (IBAction)replace:(id)sender            { [self performFindAction:FindActionReplace        withWindowController:self.windowController]; }
 
 - (IBAction)stopSearch:(id)sender
 {
-	[self.documentSearch stop];
-	self.windowController.statusString = @"Stopped.";
-}
-
-- (void)document:(NSDocument*)aDocument shouldClose:(BOOL)flag contextInfo:(FindActionTag*)context
-{
-	if(flag)
-		[self performFindAction:*context withWindowController:[[aDocument windowControllers] lastObject]];
-	delete context;
+	if(_performingFolderSearch)
+	{
+		[_documentSearch stop];
+		self.windowController.statusString = @"Stopped.";
+	}
 }
 
 - (void)performFindAction:(FindActionTag)action withWindowController:(FindWindowController*)controller
@@ -151,9 +160,6 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	[controller updateFindErrorString];
 	if(controller.findErrorString != nil)
 		return;
-
-	if(_documentSearch && _documentSearch.isDocumentEdited)
-		return [_documentSearch canCloseDocumentWithDelegate:self shouldCloseSelector:@selector(document:shouldClose:contextInfo:) contextInfo:new FindActionTag(action)];
 
 	_findOptions = (controller.regularExpression ? find::regular_expression : find::none) | (controller.ignoreWhitespace ? find::ignore_whitespace : find::none) | (controller.fullWords ? find::full_words : find::none) | (controller.ignoreCase ? find::ignore_case : find::none) | (controller.wrapAround ? find::wrap_around : find::none);
 	if(action == FindActionFindPrevious)
@@ -168,33 +174,41 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 		{
 			case FindActionFindAll:
 			{
+				[self clearMatches];
+
 				FFDocumentSearch* folderSearch = [FFDocumentSearch new];
-				folderSearch.searchString      = controller.findString;
-				folderSearch.options           = _findOptions;
-				folderSearch.projectIdentifier = self.projectIdentifier;
+				folderSearch.searchString = controller.findString;
+				folderSearch.options      = _findOptions;
+
 				if(self.documentIdentifier && [controller.searchIn isEqualToString:FFSearchInDocument])
 				{
 					folderSearch.documentIdentifier = self.documentIdentifier;
 				}
+				else if([controller.searchIn isEqualToString:FFSearchInOpenFiles])
+				{
+					folderSearch.directory = [NSString stringWithCxxString:find::kSearchOpenFiles];
+				}
 				else
 				{
-					path::glob_list_t globs;
-					if(![controller.searchIn isEqualToString:FFSearchInOpenFiles])
-					{
-						auto const settings = settings_for_path(NULL_STR, "", to_s(folder));
-						globs.add_exclude_glob(settings.get(kSettingsExcludeDirectoriesInFolderSearchKey, NULL_STR), path::kPathItemDirectory);
-						globs.add_exclude_glob(settings.get(kSettingsExcludeDirectoriesKey,               NULL_STR), path::kPathItemDirectory);
-						globs.add_exclude_glob(settings.get(kSettingsExcludeFilesInFolderSearchKey,       NULL_STR), path::kPathItemFile);
-						globs.add_exclude_glob(settings.get(kSettingsExcludeFilesKey,                     NULL_STR), path::kPathItemFile);
-						for(auto key : { kSettingsExcludeInFolderSearchKey, kSettingsExcludeKey, kSettingsBinaryKey })
-							globs.add_exclude_glob(settings.get(key, NULL_STR));
-						globs.add_include_glob(controller.searchHiddenFolders ? "{,.}*" : "*", path::kPathItemDirectory);
-						globs.add_include_glob(to_s(controller.globString), path::kPathItemFile);
-					}
+					auto const settings = settings_for_path(NULL_STR, "", to_s(folder));
 
-					find::folder_scan_settings_t search([controller.searchIn isEqualToString:FFSearchInOpenFiles] ? find::folder_scan_settings_t::open_files : to_s(folder), globs, controller.followSymbolicLinks);
-					[folderSearch setFolderOptions:search];
+					path::glob_list_t globs;
+					globs.add_exclude_glob(settings.get(kSettingsExcludeDirectoriesInFolderSearchKey, NULL_STR), path::kPathItemDirectory);
+					globs.add_exclude_glob(settings.get(kSettingsExcludeDirectoriesKey,               NULL_STR), path::kPathItemDirectory);
+					globs.add_exclude_glob(settings.get(kSettingsExcludeFilesInFolderSearchKey,       NULL_STR), path::kPathItemFile);
+					globs.add_exclude_glob(settings.get(kSettingsExcludeFilesKey,                     NULL_STR), path::kPathItemFile);
+					for(auto key : { kSettingsExcludeInFolderSearchKey, kSettingsExcludeKey, kSettingsBinaryKey })
+						globs.add_exclude_glob(settings.get(key, NULL_STR));
+					globs.add_include_glob(controller.searchHiddenFolders ? "{,.}*" : "*", path::kPathItemDirectory);
+					globs.add_include_glob(to_s(controller.globString), path::kPathItemFile);
+
+					folderSearch.directory         = folder;
+					folderSearch.globList          = globs;
+					folderSearch.searchFolderLinks = controller.searchFolderLinks;
+					folderSearch.searchFileLinks   = controller.searchFileLinks;
+					folderSearch.searchBinaryFiles = controller.searchBinaryFiles;
 				}
+
 				self.documentSearch = folderSearch;
 			}
 			break;
@@ -204,16 +218,22 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 			{
 				NSUInteger replaceCount = 0, fileCount = 0;
 				std::string replaceString = to_s(controller.replaceString);
-				for(FFMatch* fileMatch in [self.documentSearch allDocumentsWithSelectedMatches])
+
+				for(FFResultNode* parent in _results.children)
 				{
+					if(parent.countOfExcluded == parent.countOfLeafs)
+						continue;
+
 					std::multimap<std::pair<size_t, size_t>, std::string> replacements;
-					for(FFMatch* match in [self.documentSearch allSelectedMatchesForDocumentIdentifier:[fileMatch identifier]])
+					for(FFResultNode* child in parent.children)
 					{
-						++replaceCount;
-						replacements.emplace(std::make_pair([match match].first, [match match].last), controller.regularExpression ? format_string::expand(replaceString, [match match].captures) : replaceString);
+						if(child.excluded)
+							continue;
+						child.replaceString = controller.replaceString;
+						replacements.emplace(std::make_pair([child.match match].first, [child.match match].last), controller.regularExpression ? format_string::expand(replaceString, [child.match match].captures) : replaceString);
 					}
 
-					if(document::document_ptr doc = [fileMatch match].document)
+					if(document::document_ptr doc = parent.document)
 					{
 						if(doc->is_open())
 						{
@@ -221,19 +241,25 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 							doc->undo_manager().begin_undo_group(editor->ranges());
 							editor->perform_replacements(replacements);
 							doc->undo_manager().end_undo_group(editor->ranges());
+							doc->set_revision(doc->buffer().revision());
 						}
 						else
 						{
-							doc->replace(replacements);
+							if(!doc->replace(replacements, [parent.match match].crc32))
+							{
+								[parent.children setValue:nil forKey:@"replaceString"];
+								continue;
+							}
+							doc->sync_save(kCFRunLoopDefaultMode);
+							doc->set_content(NULL_STR);
 						}
-					}
 
-					++fileCount;
+						parent.ignored = YES;
+						replaceCount += replacements.size();
+						++fileCount;
+					}
 				}
-				self.documentSearch.hasPerformedReplacement = YES;
-				self.windowController.statusString = [NSString stringWithFormat:MSG_REPLACE_ALL_RESULTS, replaceCount, fileCount];
-				self.windowController.disableResultsCheckBoxes = YES;
-				self.windowController.window.documentEdited = replaceCount != 0;
+				self.windowController.statusString = [NSString stringWithFormat:MSG_REPLACE_ALL_RESULTS, [NSNumberFormatter localizedStringFromNumber:@(replaceCount) numberStyle:NSNumberFormatterDecimalStyle], [NSNumberFormatter localizedStringFromNumber:@(fileCount) numberStyle:NSNumberFormatterDecimalStyle]];
 			}
 			break;
 
@@ -252,13 +278,13 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 			case FindActionCountMatches:   _findOperation = onlySelection ? kFindOperationCountInSelection      : kFindOperationCount;      break;
 			case FindActionReplaceAll:     _findOperation = onlySelection ? kFindOperationReplaceAllInSelection : kFindOperationReplaceAll; break;
 			case FindActionReplaceAndFind: _findOperation = kFindOperationReplaceAndFind;                                                   break;
+			case FindActionReplace:        _findOperation = kFindOperationReplace;                                                          break;
 		}
 
 		self.closeWindowOnSuccess = action == FindActionFindNext && [[NSApp currentEvent] type] == NSKeyDown && to_s([NSApp currentEvent]) == utf8::to_s(NSCarriageReturnCharacter);
 		[OakPasteboard pasteboardWithName:NSFindPboard].auxiliaryOptionsForCurrent = nil;
 		[NSApp sendAction:@selector(performFindOperation:) to:nil from:self];
 	}
-	[self updateActionButtons:self];
 }
 
 - (NSString*)findString    { return self.windowController.findString    ?: @""; }
@@ -334,100 +360,128 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 // = Search in Folder =
 // ====================
 
+- (void)clearMatches
+{
+	if(_results)
+	{
+		for(FFResultNode* parent in _results.children)
+		{
+			if(document::document_ptr doc = parent.document)
+				doc->remove_all_marks(kSearchMarkIdentifier);
+		}
+
+		[self unbind:@"countOfMatches"];
+		[self unbind:@"countOfExcludedMatches"];
+	}
+
+	_windowController.resultsViewController.results = _results = [FFResultNode new];
+	[self bind:@"countOfMatches" toObject:_results withKeyPath:@"countOfLeafs" options:nil];
+	[self bind:@"countOfExcludedMatches" toObject:_results withKeyPath:@"countOfExcluded" options:nil];
+}
+
 - (void)setDocumentSearch:(FFDocumentSearch*)newSearcher
 {
 	if(_documentSearch)
 	{
-		[_documentSearch removeWindowController:self.windowController];
 		[_documentSearch removeObserver:self forKeyPath:@"currentPath"];
-		[_documentSearch removeObserver:self forKeyPath:@"hasPerformedReplacement"];
 		[[NSNotificationCenter defaultCenter] removeObserver:self name:FFDocumentSearchDidReceiveResultsNotification object:_documentSearch];
 		[[NSNotificationCenter defaultCenter] removeObserver:self name:FFDocumentSearchDidFinishNotification object:_documentSearch];
-
-		for(FFMatch* fileMatch in [_documentSearch allDocumentsWithMatches])
-		{
-			if(document::document_ptr doc = [fileMatch match].document)
-				doc->remove_all_marks("search");
-		}
-
-		_documentSearch = nil;
 	}
-
-	[self.windowController.resultsOutlineView reloadData];
-	[self.windowController.resultsOutlineView deselectAll:nil];
-	self.windowController.showResultsCollapsed = NO;
 
 	if(_documentSearch = newSearcher)
 	{
-		self.windowController.busy                     = YES;
-		self.windowController.statusString             = MSG_SEARCHING_FMT;
-		self.windowController.showsResultsOutlineView  = YES;
-		self.windowController.disableResultsCheckBoxes = _documentSearch.documentIdentifier != nil;
+		self.windowController.busy                    = YES;
+		self.windowController.statusString            = MSG_SEARCHING_FMT;
+		self.windowController.showsResultsOutlineView = YES;
+
+		self.windowController.resultsViewController.hideCheckBoxes = _documentSearch.documentIdentifier != nil;
 
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(folderSearchDidReceiveResults:) name:FFDocumentSearchDidReceiveResultsNotification object:_documentSearch];
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(folderSearchDidFinish:) name:FFDocumentSearchDidFinishNotification object:_documentSearch];
-		[_documentSearch addWindowController:self.windowController];
 		[_documentSearch addObserver:self forKeyPath:@"currentPath" options:(NSKeyValueObservingOptionNew|NSKeyValueObservingOptionOld) context:NULL];
-		[_documentSearch addObserver:self forKeyPath:@"hasPerformedReplacement" options:0 context:NULL];
+		self.performingFolderSearch = YES;
 		[_documentSearch start];
 	}
-
-	[self updateActionButtons:self];
 }
 
 - (void)folderSearchDidReceiveResults:(NSNotification*)aNotification
 {
-	NSInteger first = [self.windowController.resultsOutlineView numberOfRows];
-	[self.windowController.resultsOutlineView reloadData];
-	NSInteger last = [self.windowController.resultsOutlineView numberOfRows];
-	while(last-- != first)
-		[self.windowController.resultsOutlineView expandItem:[self.windowController.resultsOutlineView itemAtRow:last]];
-	[self.windowController.resultsOutlineView sizeLastColumnToFit];
+	NSUInteger countOfExistingItems = _results.children.count;
+
+	NSArray* matches = [aNotification userInfo][@"matches"];
+	FFResultNode* parent = nil;
+	for(FFMatch* match in matches)
+	{
+		if(document::document_ptr doc = [match match].document)
+			doc->add_mark([match match].range.from, kSearchMarkIdentifier);
+
+		FFResultNode* node = [FFResultNode resultNodeWithMatch:match];
+		if(!parent || parent.document->identifier() != node.document->identifier())
+			[_results addResultNode:(parent = [FFResultNode resultNodeWithMatch:match baseDirectory:_documentSearch.directory])];
+		[parent addResultNode:node];
+	}
+
+	[_windowController.resultsViewController insertItemsAtIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(countOfExistingItems, _results.children.count - countOfExistingItems)]];
+}
+
+- (void)addResultsToPasteboard:(id)sender
+{
+	NSMutableArray* documents = [NSMutableArray array];
+	for(FFResultNode* parent in _results.children)
+	{
+		[documents addObject:@{
+			@"identifier"      : [NSString stringWithCxxString:parent.firstResultNode.document->identifier()],
+			@"firstMatchRange" : [NSString stringWithCxxString:[parent.firstResultNode.match match].range],
+			@"lastMatchRange"  : [NSString stringWithCxxString:[parent.lastResultNode.match match].range],
+		}];
+	}
+	[OakPasteboard pasteboardWithName:NSFindPboard].auxiliaryOptionsForCurrent = @{ @"documents" : documents };
 }
 
 - (void)folderSearchDidFinish:(NSNotification*)aNotification
 {
+	self.performingFolderSearch = NO;
 	self.windowController.busy = NO;
 	if(!_documentSearch)
 		return;
 
-	NSMutableArray* documents = [NSMutableArray array];
-	for(FFMatch* fileMatch in [_documentSearch allDocumentsWithMatches])
-	{
-		if(document::document_ptr doc = [fileMatch match].document)
-		{
-			for(FFMatch* match in [_documentSearch allMatchesForDocumentIdentifier:[NSString stringWithCxxString:doc->identifier()]])
-				doc->add_mark([match match].range, "search");
+	[self addResultsToPasteboard:self];
 
-			NSArray* matches = [_documentSearch allMatchesForDocumentIdentifier:[NSString stringWithCxxString:doc->identifier()]];
-			if([matches firstObject] && [matches lastObject])
-			{
-				FFMatch* firstMatch = [matches firstObject];
-				FFMatch* lastMatch  = [matches lastObject];
-				[documents addObject:@{
-					@"identifier"      : [NSString stringWithCxxString:doc->identifier()],
-					@"firstMatchRange" : [NSString stringWithCxxString:[firstMatch match].range],
-					@"lastMatchRange"  : [NSString stringWithCxxString:[lastMatch match].range],
-				}];
-			}
-		}
-	}
-	[OakPasteboard pasteboardWithName:NSFindPboard].auxiliaryOptionsForCurrent = @{ @"documents" : documents };
-
-	NSUInteger totalMatches = [_documentSearch countOfMatches];
 	NSString* fmt = MSG_ZERO_MATCHES_FMT;
-	switch(totalMatches)
+	switch(self.countOfMatches)
 	{
 		case 0:  fmt = MSG_ZERO_MATCHES_FMT;     break;
 		case 1:  fmt = MSG_ONE_MATCH_FMT;        break;
 		default: fmt = MSG_MULTIPLE_MATCHES_FMT; break;
 	}
 
-	NSString* msg = [NSString stringWithFormat:fmt, [_documentSearch searchString], [NSNumberFormatter localizedStringFromNumber:@(totalMatches) numberStyle:NSNumberFormatterDecimalStyle]];
-	if(!_documentSearch.documentIdentifier)
-		msg = [msg stringByAppendingFormat:([_documentSearch scannedFileCount] == 1 ? MSG_SEARCHED_FILES_ONE : MSG_SEARCHED_FILES_MULTIPLE), [NSNumberFormatter localizedStringFromNumber:@([_documentSearch scannedFileCount]) numberStyle:NSNumberFormatterDecimalStyle], [_documentSearch searchDuration]];
+	NSString* msg = [NSString stringWithFormat:fmt, [_documentSearch searchString], [NSNumberFormatter localizedStringFromNumber:@(self.countOfMatches) numberStyle:NSNumberFormatterDecimalStyle]];
+	if(_documentSearch.documentIdentifier)
+	{
+		self.windowController.statusString = msg;
+	}
+	else
+	{
+		NSNumberFormatter* formatter = [NSNumberFormatter new];
+		formatter.numberStyle = NSNumberFormatterDecimalStyle;
+		formatter.maximumFractionDigits = 1;
+		NSString* seconds = [formatter stringFromNumber:@([_documentSearch searchDuration])];
 
-	self.windowController.statusString = msg;
+		self.windowController.statusString          = [msg stringByAppendingFormat:([_documentSearch scannedFileCount] == 1 ? MSG_SEARCHED_FILES_ONE : MSG_SEARCHED_FILES_MULTIPLE), [NSNumberFormatter localizedStringFromNumber:@([_documentSearch scannedFileCount]) numberStyle:NSNumberFormatterDecimalStyle], seconds];
+		self.windowController.alternateStatusString = [msg stringByAppendingFormat:MSG_SEARCHED_BYTES, [NSString stringWithCxxString:text::format_size([_documentSearch scannedByteCount])], seconds];
+	}
+
+	__weak __block id observerId = [[NSNotificationCenter defaultCenter] addObserverForName:OakPasteboardDidChangeNotification object:[OakPasteboard pasteboardWithName:NSFindPboard] queue:nil usingBlock:^(NSNotification*){
+		if(_results)
+		{
+			for(FFResultNode* parent in _results.children)
+			{
+				if(document::document_ptr doc = parent.document)
+					doc->remove_all_marks(kSearchMarkIdentifier);
+			}
+		}
+		[[NSNotificationCenter defaultCenter] removeObserver:observerId];
+	}];
 }
 
 - (void)observeValueForKeyPath:(NSString*)keyPath ofObject:(id)object change:(NSDictionary*)change context:(void*)context
@@ -448,297 +502,50 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 
 		self.windowController.statusString = [NSString localizedStringWithFormat:MSG_SEARCHING_FOLDER_FMT, [NSString stringWithCxxString:relative]];
 	}
-	else if([keyPath isEqualToString:@"hasPerformedReplacement"])
-	{
-		[self.windowController.resultsOutlineView reloadData];
-	}
-}
-
-// ============================
-// = Outline view data source =
-// ============================
-
-- (NSInteger)outlineView:(NSOutlineView*)outlineView numberOfChildrenOfItem:(id)item
-{
-	if(_documentSearch.hasPerformedReplacement)
-			return item ? 1 : [[_documentSearch allDocumentsWithSelectedMatches] count];
-	else	return [(item ? [_documentSearch allMatchesForDocumentIdentifier:[item identifier]] : [_documentSearch allDocumentsWithMatches]) count];
-}
-
-- (BOOL)outlineView:(NSOutlineView*)outlineView isItemExpandable:(id)item
-{
-	return [self outlineView:outlineView isGroupItem:item];
-}
-
-- (id)outlineView:(NSOutlineView*)outlineView child:(NSInteger)childIndex ofItem:(id)item
-{
-	if(item)
-		return [[_documentSearch allMatchesForDocumentIdentifier:[item identifier]] objectAtIndex:childIndex];
-	else if(_documentSearch.hasPerformedReplacement)
-		return [[_documentSearch allDocumentsWithSelectedMatches] objectAtIndex:childIndex];
-	else
-		return [[_documentSearch allDocumentsWithMatches] objectAtIndex:childIndex];
-}
-
-static NSAttributedString* AttributedStringForMatch (std::string const& text, size_t from, size_t to, size_t n)
-{
-	ns::attr_string_t str;
-	str.add(ns::style::line_break(NSLineBreakByTruncatingTail));
-	str.add([NSColor darkGrayColor]);
-	str.add([NSFont systemFontOfSize:11]);
-
-	str.add(text::pad(++n, 4) + ": ");
-
-	bool inMatch = false;
-	size_t last = text.size();
-	for(size_t it = 0; it != last; )
-	{
-		size_t eol = std::find(text.begin() + it, text.end(), '\n') - text.begin();
-
-		if(oak::cap(it, from, eol) == from)
-		{
-			str.add(text.substr(it, from-it));
-			it = from;
-			inMatch = true;
-		}
-
-		if(inMatch)
-		{
-			str.add([NSFont boldSystemFontOfSize:11]);
-			str.add([NSColor blackColor]);
-		}
-
-		if(inMatch && oak::cap(it, to, eol) == to)
-		{
-			str.add(text.substr(it, to-it));
-			it = to;
-			inMatch = false;
-
-			str.add([NSColor darkGrayColor]);
-			str.add([NSFont systemFontOfSize:11]);
-		}
-
-		str.add(text.substr(it, eol-it));
-
-		if(eol != last)
-		{
-			str.add("¬");
-
-			if(inMatch)
-			{
-				str.add([NSFont systemFontOfSize:11]);
-				str.add([NSColor darkGrayColor]);
-			}
-
-			if(++eol == to)
-				inMatch = false;
-
-			if(eol != last)
-				str.add("\n" + text::pad(++n, 4) + ": ");
-		}
-
-		it = eol;
-	}
-
-	return str;
-}
-
-- (id)outlineView:(NSOutlineView*)outlineView objectValueForTableColumn:(NSTableColumn*)tableColumn byItem:(id)item
-{
-	if([self outlineView:outlineView isGroupItem:item])
-	{
-		return item;
-	}
-	else if([[tableColumn identifier] isEqualToString:@"checkbox"])
-	{
-		return @(![_documentSearch skipReplacementForMatch:item]);
-	}
-	else if([[tableColumn identifier] isEqualToString:@"match"])
-	{
-		if(_documentSearch.hasPerformedReplacement)
-		{
-			NSUInteger count = [[_documentSearch allSelectedMatchesForDocumentIdentifier:[item identifier]] count];
-			return [NSString stringWithFormat:@"%lu occurrence%s replaced.", count, count == 1 ? "" : "s"];
-		}
-		else if([(FFMatch*)item match].binary)
-		{
-			ns::attr_string_t res;
-			res = ns::attr_string_t([NSColor darkGrayColor])
-			    << ns::style::line_break(NSLineBreakByTruncatingTail)
-			    << "(binary file)";
-			return res.get();
-		}
-		else
-		{
-			find::match_t const& m = [(FFMatch*)item match];
-			std::string str = [(FFMatch*)item matchText];
-
-			size_t from = std::min<size_t>(m.first - m.bol_offset, str.size());
-			size_t to   = std::min<size_t>(m.last  - m.bol_offset, str.size());
-
-			std::string prefix = str.substr(0, from);
-			std::string middle = str.substr(from, to - from);
-			std::string suffix = str.substr(to);
-
-			if(!suffix.empty() && suffix.back() == '\n')
-				suffix = suffix.substr(0, suffix.size()-1);
-
-			if(utf8::is_valid(prefix.begin(), prefix.end()) && utf8::is_valid(middle.begin(), middle.end()) && utf8::is_valid(suffix.begin(), suffix.end()))
-			{
-				if(self.windowController.showReplacementPreviews && ![_documentSearch skipReplacementForMatch:item])
-					middle = self.windowController.regularExpression ? format_string::expand(to_s(self.replaceString), m.captures) : to_s(self.replaceString);
-				return AttributedStringForMatch(prefix + middle + suffix, prefix.size(), prefix.size() + middle.size(), m.range.from.line);
-			}
-			else
-			{
-				ns::attr_string_t res;
-				res = ns::attr_string_t([NSColor darkGrayColor])
-				    << ns::style::line_break(NSLineBreakByTruncatingTail)
-				    << text::format("%ld-%ld: (file has changed, re-run the search)", m.first, m.last);
-				return res.get();
-			}
-		}
-	}
-	return nil;
-}
-
-- (void)outlineView:(NSOutlineView*)outlineView setObjectValue:(id)objectValue forTableColumn:(NSTableColumn*)tableColumn byItem:(id)item
-{
-	if(![tableColumn.identifier isEqualToString:@"checkbox"])
-		return;
-
-	if(OakIsAlternateKeyOrMouseEvent())
-	{
-		// Toggle all flags for the file
-		for(FFMatch* match in [_documentSearch allMatchesForDocumentIdentifier:[item identifier]])
-			[_documentSearch setSkipReplacement:![objectValue boolValue] forMatch:match];
-		[outlineView reloadData];
-	}
-	else
-	{
-		[_documentSearch setSkipReplacement:![objectValue boolValue] forMatch:item];
-	}
-
-	[self updateActionButtons:self];
-}
-
-- (void)outlineView:(NSOutlineView*)outlineView willDisplayCell:(id)cell forTableColumn:(NSTableColumn*)tableColumn item:(id)item
-{
-	if([self outlineView:outlineView isGroupItem:item])
-	{
-		if(!tableColumn && [cell isKindOfClass:[FFFilePathCell class]])
-		{
-			FFFilePathCell* pathCell = (FFFilePathCell*)cell;
-			pathCell.icon = [item icon];
-			pathCell.path = [item path] ?: [NSString stringWithCxxString:[(FFMatch*)item match].document->display_name()];
-			pathCell.base = self.searchFolder;
-			pathCell.count = [outlineView isItemExpanded:item] ? 0 : [[_documentSearch allMatchesForDocumentIdentifier:[item identifier]] count];
-		}
-	}
-	else if([[tableColumn identifier] isEqualToString:@"match"] && [cell isHighlighted])
-	{
-		id obj = [cell objectValue];
-		if([obj isKindOfClass:[NSAttributedString class]])
-		{
-			NSMutableAttributedString* str = [obj mutableCopy];
-			[str addAttribute:NSForegroundColorAttributeName value:[NSColor selectedTextColor] range:NSMakeRange(0, [str length])];
-			[cell setAttributedStringValue:str];
-		}
-	}
-}
-
-- (BOOL)outlineView:(NSOutlineView*)outlineView isGroupItem:(id)item
-{
-	return [outlineView levelForItem:item] == 0;
-}
-
-- (CGFloat)outlineView:(NSOutlineView*)outlineView heightOfRowByItem:(id)item
-{
-	if([self outlineView:outlineView isGroupItem:item])
-		return 22;
-
-	size_t lines = 1;
-
-	find::match_t const& m = [(FFMatch*)item match];
-	if(!m.binary && !_documentSearch.hasPerformedReplacement)
-	{
-		size_t firstLine = m.range.from.line;
-		size_t lastLine = m.range.to.line;
-		if(firstLine == lastLine || m.range.to.column != 0)
-			++lastLine;
-		lines = (lastLine - firstLine);
-	}
-
-	return lines * [outlineView rowHeight];
-}
-
-- (NSCell*)outlineView:(NSOutlineView*)outlineView dataCellForTableColumn:(NSTableColumn*)tableColumn item:(id)item
-{
-	if(tableColumn == nil && [self outlineView:outlineView isGroupItem:item])
-		return [FFFilePathCell new];
-	return [tableColumn dataCell];
-}
-
-// ======================
-// = Should Select Item =
-// ======================
-
-- (BOOL)outlineView:(NSOutlineView*)outlineView shouldSelectItem:(id)item
-{
-	if([self outlineView:outlineView isGroupItem:item])
-		return NO;
-
-	NSInteger clickedColumn = [outlineView clickedColumn];
-	NSTableColumn* col = clickedColumn != -1 ? [[outlineView tableColumns] objectAtIndex:clickedColumn] : nil;
-	if([[col identifier] isEqualToString:@"checkbox"])
-		return NO;
-
-	return YES;
-}
-
-- (BOOL)outlineView:(NSOutlineView*)outlineView shouldTrackCell:(NSCell*)cell forTableColumn:(NSTableColumn*)tableColumn item:(id)item
-{
-	return YES;
 }
 
 // =============================
 // = Selecting Results Actions =
 // =============================
 
-- (void)didDoubleClickResultsOutlineView:(id)sender
+- (void)didSelectResult:(FFResultNode*)item
 {
-	NSOutlineView* outlineView = self.windowController.resultsOutlineView;
-	NSInteger clickedColumn = [outlineView clickedColumn];
-	NSTableColumn* col = clickedColumn != -1 ? [[outlineView tableColumns] objectAtIndex:clickedColumn] : nil;
-	if([[col identifier] isEqualToString:@"checkbox"])
-		return;
+	auto doc = item.document;
+	if(!doc->is_open())
+		doc->set_recent_tracking(false);
+	document::show(doc, self.projectIdentifier ? oak::uuid_t(to_s(self.projectIdentifier)) : document::kCollectionAny, [item.match match].range, false);
+}
 
+- (void)didDoubleClickResult:(FFResultNode*)item
+{
 	[self.windowController close];
 }
 
-- (void)openDocumentForSelectedRow:(id)sender
+- (void)didRemoveResult:(FFResultNode*)item
 {
-	NSOutlineView* outlineView = self.windowController.resultsOutlineView;
-	if([outlineView numberOfSelectedRows] == 1)
+	if(OakIsAlternateKeyOrMouseEvent())
 	{
-		NSUInteger selectionIndex = [[outlineView selectedRowIndexes] firstIndex];
-		FFMatch* selectedMatch    = [outlineView itemAtRow:selectionIndex];
-		auto doc = [selectedMatch match].document;
-		if(!doc->is_open())
-			doc->set_recent_tracking(false);
-		document::show(doc, _documentSearch.projectIdentifier ? oak::uuid_t(to_s(_documentSearch.projectIdentifier)) : document::kCollectionAny, [selectedMatch match].range, false);
+		if(item.document->path() != NULL_STR)
+		{
+			std::string path = path::relative_to(item.document->path(), to_s(_documentSearch.directory));
+			NSString* newGlob = [_windowController.globString stringByAppendingFormat:@"~%@", [NSString stringWithCxxString:path]];
+			_windowController.globString = newGlob;
+		}
 	}
-}
 
-- (void)didSingleClickResultsOutlineView:(id)sender
-{
-	[self openDocumentForSelectedRow:self];
-}
+	if(document::document_ptr doc = item.document)
+		doc->remove_all_marks(kSearchMarkIdentifier);
 
-- (void)outlineViewSelectionDidChange:(NSNotification*)aNotification
-{
-	if([[NSApp currentEvent] type] != NSLeftMouseUp)
-		[self openDocumentForSelectedRow:self];
+	[self addResultsToPasteboard:self];
+
+	NSString* fmt = MSG_SHOWING_ZERO_MATCHES_FMT;
+	switch(self.countOfMatches)
+	{
+		case 0:  fmt = MSG_SHOWING_ZERO_MATCHES_FMT;     break;
+		case 1:  fmt = MSG_SHOWING_ONE_MATCH_FMT;        break;
+		default: fmt = MSG_SHOWING_MULTIPLE_MATCHES_FMT; break;
+	}
+	_windowController.statusString = [NSString stringWithFormat:fmt, [_documentSearch searchString], [NSNumberFormatter localizedStringFromNumber:@(self.countOfMatches) numberStyle:NSNumberFormatterDecimalStyle]];
 }
 
 // ==================
@@ -747,42 +554,28 @@ static NSAttributedString* AttributedStringForMatch (std::string const& text, si
 
 - (IBAction)takeSelectedPathFrom:(id)sender
 {
-	if(NSString* path = [sender representedObject])
-	{
-		for(FFMatch* match in _documentSearch.allDocumentsWithMatches)
-		{
-			if([match.path isEqualToString:path])
-			{
-				NSOutlineView* outlineView = self.windowController.resultsOutlineView;
-				NSUInteger row = [outlineView rowForItem:match];
-				if(![outlineView isItemExpanded:match])
-					[outlineView expandItem:match];
-				NSUInteger firstMatch = row + ([outlineView isItemExpanded:match] ? 1 : 0);
-				[outlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:firstMatch] byExtendingSelection:NO];
-				[outlineView scrollRowToVisible:outlineView.numberOfRows-1];
-				[outlineView scrollRowToVisible:row];
-				[outlineView.window makeFirstResponder:outlineView];
-				break;
-			}
-		}
-	}
+	FFResultNode* item = [sender representedObject];
+	if([item isKindOfClass:[FFResultNode class]])
+		[_windowController.resultsViewController showResultNode:item.firstResultNode];
 }
 
 - (void)updateGoToMenu:(NSMenu*)aMenu
 {
-	if(_documentSearch.allDocumentsWithMatches.count == 0)
+	if(self.countOfMatches == 0)
 	{
 		[[aMenu addItemWithTitle:@"No Results" action:@selector(nop:) keyEquivalent:@""] setEnabled:NO];
 	}
 	else
 	{
 		char key = 0;
-		for(FFMatch* match in _documentSearch.allDocumentsWithMatches)
+		for(FFResultNode* parent in _results.children)
 		{
-			document::document_ptr doc = [match match].document;
-			NSMenuItem* item = [aMenu addItemWithTitle:[NSString stringWithCxxString:doc->path() == NULL_STR ? doc->display_name() : path::relative_to(doc->path(), to_s(self.searchFolder))] action:@selector(takeSelectedPathFrom:) keyEquivalent:key < 10 ? [NSString stringWithFormat:@"%c", '0' + (++key % 10)] : @""];
-			[item setImage:match.icon];
-			[item setRepresentedObject:match.path];
+			if(document::document_ptr doc = parent.document)
+			{
+				NSMenuItem* item = [aMenu addItemWithTitle:[NSString stringWithCxxString:doc->path() == NULL_STR ? doc->display_name() : path::relative_to(doc->path(), to_s(self.searchFolder))] action:@selector(takeSelectedPathFrom:) keyEquivalent:key < 10 ? [NSString stringWithFormat:@"%c", '0' + (++key % 10)] : @""];
+				[item setImage:parent.icon];
+				[item setRepresentedObject:parent];
+			}
 		}
 	}
 }
@@ -795,26 +588,18 @@ static NSAttributedString* AttributedStringForMatch (std::string const& text, si
 {
 	std::vector<std::string> res;
 
-	NSOutlineView* outlineView = self.windowController.resultsOutlineView;
-	NSIndexSet* selectedRows = [outlineView numberOfSelectedRows] == 0 ? [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, [outlineView numberOfRows])] : [outlineView selectedRowIndexes];
-	for(NSUInteger index = [selectedRows firstIndex]; index != NSNotFound; index = [selectedRows indexGreaterThanIndex:index])
+	for(FFResultNode* item in _windowController.resultsViewController.selectedResults)
 	{
-		FFMatch* item = [outlineView itemAtRow:index];
-		if([self outlineView:outlineView isGroupItem:item])
-			continue;
-
-		find::match_t const& m = [item match];
-		std::string str = [item matchText];
-		size_t from = std::min<size_t>(m.first - m.bol_offset, str.size());
-		size_t to   = std::min<size_t>(m.last  - m.bol_offset, str.size());
+		find::match_t const& m = [item.match match];
+		std::string str = m.excerpt;
 
 		if(!entireLines)
-			str = str.substr(from, to - from);
+			str = str.substr(m.first - m.excerpt_offset, m.last - m.first);
 		else if(str.size() && str.back() == '\n')
 			str.erase(str.size()-1);
 
 		if(withFilename)
-			str = text::format("%s:%lu\t", [item.path UTF8String], m.range.from.line + 1) + str;
+			str = text::format("%s:%lu\t", [item.path UTF8String], m.line_number + 1) + str;
 
 		res.push_back(str);
 	}
@@ -829,11 +614,34 @@ static NSAttributedString* AttributedStringForMatch (std::string const& text, si
 - (void)copyEntireLines:(id)sender               { [self copyEntireLines:YES withFilename:NO ]; }
 - (void)copyEntireLinesWithFilename:(id)sender   { [self copyEntireLines:YES withFilename:YES]; }
 
+// =====================
+// = Check/Uncheck All =
+// =====================
+
+- (void)allMatchesSetExclude:(BOOL)exclude
+{
+	_results.excluded = exclude;
+}
+
+- (IBAction)checkAll:(id)sender
+{
+	[self allMatchesSetExclude:NO];
+}
+
+- (IBAction)uncheckAll:(id)sender
+{
+	[self allMatchesSetExclude:YES];
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem*)aMenuItem
 {
 	static std::set<SEL> const copyActions = { @selector(copy:), @selector(copyMatchingParts:), @selector(copyMatchingPartsWithFilename:), @selector(copyEntireLines:), @selector(copyEntireLinesWithFilename:) };
 	if(copyActions.find(aMenuItem.action) != copyActions.end())
-		return [self.windowController.resultsOutlineView numberOfRows] != 0;
+		return [_results countOfLeafs] != 0;
+	else if(aMenuItem.action == @selector(checkAll:))
+		return self.countOfExcludedMatches > 0;
+	else if(aMenuItem.action == @selector(uncheckAll:) )
+		return self.countOfExcludedMatches < self.countOfMatches;
 	return YES;
 }
 @end

@@ -60,11 +60,7 @@ static void ShowLoadErrorForURL (WebFrame* frame, NSURL* url, NSError* error)
 			@"statusBar" : _statusBar
 		};
 
-		for(NSView* view in [views allValues])
-		{
-			[view setTranslatesAutoresizingMaskIntoConstraints:NO];
-			[self addSubview:view];
-		}
+		OakAddAutoLayoutViewsToSuperview([views allValues], self);
 
 		[self addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[webView(==statusBar,==divider)]|"    options:NSLayoutFormatAlignAllTop           metrics:nil views:views]];
 		[self addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[webView(>=10)][divider][statusBar]|" options:NSLayoutFormatAlignAllLeading metrics:nil views:views]];
@@ -106,6 +102,45 @@ static void ShowLoadErrorForURL (WebFrame* frame, NSURL* url, NSError* error)
 		[[NSNotificationCenter defaultCenter] removeObserver:self name:WebViewProgressEstimateChangedNotification object:_webView];
 		[[NSNotificationCenter defaultCenter] removeObserver:self name:WebViewProgressFinishedNotification object:_webView];
 	}
+}
+
+// ==============
+// = Key Events =
+// ==============
+
+/*
+Since the webView is typically the first responder, the path for key events is as follows:
+
+For keyDown:
+	webView
+	HOBrowserView
+	OakHTMLOutputView
+	NSWindow
+
+For performKeyEquivalent:
+	NSWindow
+	OakHTMLOutputView
+	HOBrowserView
+	webView
+
+A webView default implementation passes all key events, including potential key equivalents (except ESC),
+to the webpage so that it may have a chance to respond. Unfortunately, we cannot know if these events are
+handled so the events are still forwarded down their respective chains as shown above. So to avoid the
+NSBeep when hitting the end of the responder chain, we let HOBrowserView swallow all key events. This is
+safe since performKeyEquivalent: is called first, which leads to another problem: we can pass
+the key event back to the webView (minus the modifier). Therefore, we also terminate the above chain for
+performKeyEquivalent: by overriding the method here and returning just NO. Note: that if none of the views
+in the hierachy returns YES, the key (equivalent) event is then passed to the menus.
+*/
+
+- (BOOL)performKeyEquivalent
+{
+	return NO;
+}
+
+- (void)keyDown:(NSEvent*)anEvent
+{
+
 }
 
 // =========

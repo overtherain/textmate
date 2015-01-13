@@ -13,7 +13,6 @@
 #import <OakAppKit/OakAppKit.h>
 #import <OakAppKit/OakPasteboard.h>
 #import <OakFilterList/BundleItemChooser.h>
-#import <OakFilterList/OakFilterList.h>
 #import <OakFoundation/NSString Additions.h>
 #import <OakTextView/OakDocumentView.h>
 #import <Preferences/Keys.h>
@@ -81,7 +80,6 @@ BOOL HasDocumentWindow (NSArray* windows)
 }
 
 @interface AppController ()
-@property (nonatomic) OakFilterWindowController* filterWindowController;
 @property (nonatomic) BOOL didFinishLaunching;
 @property (nonatomic) BOOL currentResponderIsOakTextView;
 @end
@@ -148,7 +146,7 @@ BOOL HasDocumentWindow (NSArray* windows)
 	NSDate* currentDate    = [NSDate date];
 	NSDate* compileDate    = [NSDate dateWithString:@COMPILE_DATE @" 00:00:00 +0000"];
 	NSDate* warningDate    = [compileDate dateByAddingTimeInterval: 90*kSecondsPerDay];
-	NSDate* expirationDate = [compileDate dateByAddingTimeInterval:120*kSecondsPerDay];
+	NSDate* expirationDate = [compileDate dateByAddingTimeInterval:180*kSecondsPerDay];
 
 	if([currentDate laterDate:expirationDate] == currentDate)
 	{
@@ -161,17 +159,26 @@ BOOL HasDocumentWindow (NSArray* windows)
 	else if([currentDate laterDate:warningDate] == currentDate)
 	{
 		NSInteger daysUntilExpiration = floor([expirationDate timeIntervalSinceNow] / kSecondsPerDay);
-		NSInteger weeksSinceCompilation = floor(-[compileDate timeIntervalSinceNow] / kSecondsPerDay / 7);
-		NSInteger choice = NSRunAlertPanel(@"TextMate is Outdated!", @"This version of TextMate is more than %ld weeks old and you should update to latest version. You can continue to use this version for another %ld day%s.", @"Continue", @"Visit Download Page", nil, weeksSinceCompilation, daysUntilExpiration, daysUntilExpiration == 1 ? "" : "s");
-		if(choice == NSAlertAlternateReturn) // "Visit Website"
-			[[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://macromates.com/download"]];
+		NSInteger weeksSinceCompilation = floor([[NSDate date] timeIntervalSinceDate:compileDate] / kSecondsPerDay / 7);
+		NSInteger choice = NSRunAlertPanel(@"TextMate is Getting Old!", @"You are using a beta of TextMate which you haven’t updated in more than %ld weeks.\nYou can continue to use this version for another %ld day%s, but consider checking for an update as many fixes and improvements await you!", @"Continue", @"Check for Updates", nil, weeksSinceCompilation, daysUntilExpiration, daysUntilExpiration == 1 ? "" : "s");
+		if(choice == NSAlertAlternateReturn) // "Check for Updates"
+			[[SoftwareUpdate sharedInstance] checkForUpdates:self];
 	}
-	[NSTimer scheduledTimerWithTimeInterval:kSecondsPerDay target:self selector:@selector(checkExpirationDate:) userInfo:nil repeats:NO];
+	[NSTimer scheduledTimerWithTimeInterval:7 * kSecondsPerDay target:self selector:@selector(checkExpirationDate:) userInfo:nil repeats:NO];
 }
 
 - (void)applicationWillFinishLaunching:(NSNotification*)aNotification
 {
 	D(DBF_AppController, bug("\n"););
+	SoftwareUpdate* swUpdate = [SoftwareUpdate sharedInstance];
+	NSString* parms = [NSString stringWithFormat:@"v=%@&os=%zu.%zu.%zu", [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding], oak::os_major(), oak::os_minor(), oak::os_patch()];
+	[swUpdate setSignee:key_chain_t::key_t("org.textmate.duff", "Allan Odgaard", "-----BEGIN PUBLIC KEY-----\nMIIBtjCCASsGByqGSM44BAEwggEeAoGBAPIE9PpXPK3y2eBDJ0dnR/D8xR1TiT9m\n8DnPXYqkxwlqmjSShmJEmxYycnbliv2JpojYF4ikBUPJPuerlZfOvUBC99ERAgz7\nN1HYHfzFIxVo1oTKWurFJ1OOOsfg8AQDBDHnKpS1VnwVoDuvO05gK8jjQs9E5LcH\ne/opThzSrI7/AhUAy02E9H7EOwRyRNLofdtPxpa10o0CgYBKDfcBscidAoH4pkHR\nIOEGTCYl3G2Pd1yrblCp0nCCUEBCnvmrWVSXUTVa2/AyOZUTN9uZSC/Kq9XYgqwj\nhgzqa8h/a8yD+ao4q8WovwGeb6Iso3WlPl8waz6EAPR/nlUTnJ4jzr9t6iSH9owS\nvAmWrgeboia0CI2AH++liCDvigOBhAACgYAFWO66xFvmF2tVIB+4E7CwhrSi2uIk\ndeBrpmNcZZ+AVFy1RXJelNe/cZ1aXBYskn/57xigklpkfHR6DGqpEbm6KC/47Jfy\ny5GEx+F/eBWEePi90XnLinytjmXRmS2FNqX6D15XNG1xJfjociA8bzC7s4gfeTUd\nlpQkBq2z71yitA==\n-----END PUBLIC KEY-----\n")];
+	[swUpdate setChannels:@{
+		kSoftwareUpdateChannelRelease : [NSURL URLWithString:[NSString stringWithFormat:@"%s/releases/release?%@", REST_API, parms]],
+		kSoftwareUpdateChannelBeta    : [NSURL URLWithString:[NSString stringWithFormat:@"%s/releases/beta?%@", REST_API, parms]],
+		kSoftwareUpdateChannelNightly : [NSURL URLWithString:[NSString stringWithFormat:@"%s/releases/nightly?%@", REST_API, parms]],
+	}];
+
 	[self checkExpirationDate:self];
 
 	settings_t::set_default_settings_path([[[NSBundle mainBundle] pathForResource:@"Default" ofType:@"tmProperties"] fileSystemRepresentation]);
@@ -183,7 +190,6 @@ BOOL HasDocumentWindow (NSArray* windows)
 		rename(src.c_str(), dst.c_str());
 
 	[[NSUserDefaults standardUserDefaults] registerDefaults:@{
-		@"ApplePressAndHoldEnabled" : @NO,
 		@"NSRecentDocumentsLimit"   : @25,
 		@"WebKitDeveloperExtras"    : @YES,
 	}];
@@ -234,7 +240,7 @@ BOOL HasDocumentWindow (NSArray* windows)
 
 	if(BOOL restoreSession = ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableSessionRestoreKey])
 	{
-		std::string const prematureTerminationDuringRestore = path::join(path::home(), "Library/Application Support/TextMate/Session/restore_in_progress");;
+		std::string const prematureTerminationDuringRestore = path::join(path::temp(), "textmate_session_restore");
 
 		NSString* promptUser = nil;
 		if(path::exists(prematureTerminationDuringRestore))
@@ -244,8 +250,8 @@ BOOL HasDocumentWindow (NSArray* windows)
 
 		if(promptUser)
 		{
-			NSInteger choice = NSRunAlertPanel(@"Disable Session Restore?", @"%@", @"Disable", @"Restore Documents", nil, promptUser);
-			if(choice == NSAlertDefaultReturn) // "Disable"
+			NSInteger choice = NSRunAlertPanel(@"Disable Session Restore?", @"%@", @"Restore Documents", @"Disable", nil, promptUser);
+			if(choice == NSAlertAlternateReturn) // "Disable"
 				restoreSession = NO;
 		}
 
@@ -271,15 +277,6 @@ BOOL HasDocumentWindow (NSArray* windows)
 	BOOL disableUntitledAtStartupPrefs = [[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableNewDocumentAtStartupKey];
 	if(!disableUntitledAtStartupPrefs && !HasDocumentWindow([NSApp orderedWindows]))
 		[self newDocument:self];
-
-	SoftwareUpdate* swUpdate = [SoftwareUpdate sharedInstance];
-	NSString* parms = [NSString stringWithFormat:@"v=%@&os=%zu.%zu.%zu", [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding], oak::os_major(), oak::os_minor(), oak::os_patch()];
-	[swUpdate setSignee:key_chain_t::key_t("org.textmate.duff", "Allan Odgaard", "-----BEGIN PUBLIC KEY-----\nMIIBtjCCASsGByqGSM44BAEwggEeAoGBAPIE9PpXPK3y2eBDJ0dnR/D8xR1TiT9m\n8DnPXYqkxwlqmjSShmJEmxYycnbliv2JpojYF4ikBUPJPuerlZfOvUBC99ERAgz7\nN1HYHfzFIxVo1oTKWurFJ1OOOsfg8AQDBDHnKpS1VnwVoDuvO05gK8jjQs9E5LcH\ne/opThzSrI7/AhUAy02E9H7EOwRyRNLofdtPxpa10o0CgYBKDfcBscidAoH4pkHR\nIOEGTCYl3G2Pd1yrblCp0nCCUEBCnvmrWVSXUTVa2/AyOZUTN9uZSC/Kq9XYgqwj\nhgzqa8h/a8yD+ao4q8WovwGeb6Iso3WlPl8waz6EAPR/nlUTnJ4jzr9t6iSH9owS\nvAmWrgeboia0CI2AH++liCDvigOBhAACgYAFWO66xFvmF2tVIB+4E7CwhrSi2uIk\ndeBrpmNcZZ+AVFy1RXJelNe/cZ1aXBYskn/57xigklpkfHR6DGqpEbm6KC/47Jfy\ny5GEx+F/eBWEePi90XnLinytjmXRmS2FNqX6D15XNG1xJfjociA8bzC7s4gfeTUd\nlpQkBq2z71yitA==\n-----END PUBLIC KEY-----\n")];
-	[swUpdate setChannels:@{
-		kSoftwareUpdateChannelRelease : [NSURL URLWithString:[NSString stringWithFormat:@"%s/releases/release?%@", REST_API, parms]],
-		kSoftwareUpdateChannelBeta    : [NSURL URLWithString:[NSString stringWithFormat:@"%s/releases/beta?%@", REST_API, parms]],
-		kSoftwareUpdateChannelNightly : [NSURL URLWithString:[NSString stringWithFormat:@"%s/releases/nightly?%@", REST_API, parms]],
-	}];
 
 	[self userDefaultsDidChange:nil]; // setup mate/rmate server
 	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(userDefaultsDidChange:) name:NSUserDefaultsDidChangeNotification object:[NSUserDefaults standardUserDefaults]];
@@ -394,48 +391,29 @@ BOOL HasDocumentWindow (NSArray* windows)
 // = Bundle Item Chooser =
 // =======================
 
-- (void)setFilterWindowController:(OakFilterWindowController*)controller
-{
-	if(controller != _filterWindowController)
-	{
-		if(_filterWindowController)
-		{
-			[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowWillCloseNotification object:_filterWindowController.window];
-			_filterWindowController.target = nil;
-			[_filterWindowController close];
-		}
-
-		if(_filterWindowController = controller)
-			[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(filterWindowWillClose:) name:NSWindowWillCloseNotification object:_filterWindowController.window];
-	}
-}
-
-- (void)filterWindowWillClose:(NSNotification*)notification
-{
-	BundleItemChooser* dataSource = [_filterWindowController dataSource];
-	bundleItemSearch.filter_string  = to_s([dataSource filterString]);
-	bundleItemSearch.key_equivalent = [dataSource keyEquivalentSearch];
-	bundleItemSearch.all_scopes     = [dataSource searchAllScopes];
-	bundleItemSearch.search_type    = [dataSource searchType];
-	self.filterWindowController     = nil;
-}
-
 - (IBAction)showBundleItemChooser:(id)sender
 {
-	self.filterWindowController            = [OakFilterWindowController new];
-	OakTextView* textView                  = [NSApp targetForAction:@selector(scopeContext)];
+	BundleItemChooser* chooser = [BundleItemChooser sharedInstance];
+	chooser.action     = @selector(bundleItemChooserDidSelectItems:);
+	chooser.editAction = @selector(editBundleItem:);
 
-	BundleItemChooser* dataSource          = [BundleItemChooser bundleItemChooserForScope:textView ? [textView scopeContext] : scope::wildcard];
-	dataSource.searchType                  = search::type(bundleItemSearch.search_type);
-	dataSource.keyEquivalentSearch         = bundleItemSearch.key_equivalent;
-	dataSource.textViewHasSelection        = [textView hasSelection];
-	dataSource.searchAllScopes             = bundleItemSearch.all_scopes;
-	dataSource.filterString                = [NSString stringWithCxxString:bundleItemSearch.filter_string];
+	OakTextView* textView = [NSApp targetForAction:@selector(scopeContext)];
+	chooser.scope        = textView ? [textView scopeContext] : scope::wildcard;
+	chooser.hasSelection = [textView hasSelection];
 
-	_filterWindowController.dataSource      = dataSource;
-	_filterWindowController.action          = @selector(bundleItemChooserDidSelectItems:);
-	_filterWindowController.accessoryAction = @selector(editBundleItem:);
-	[_filterWindowController showWindowRelativeToWindow:[textView window]];
+	if(DocumentController* controller = [NSApp targetForAction:@selector(selectedDocument)])
+	{
+		document::document_ptr doc = controller.selectedDocument;
+		chooser.path      = doc ? [NSString stringWithCxxString:doc->path()] : nil;
+		chooser.directory = doc && doc->path() != NULL_STR ? [NSString stringWithCxxString:path::parent(doc->path())] : controller.untitledSavePath;
+	}
+	else
+	{
+		chooser.path      = nil;
+		chooser.directory = nil;
+	}
+
+	[chooser showWindowRelativeToFrame:textView.window ? [textView.window convertRectToScreen:[textView convertRect:[textView visibleRect] toView:nil]] : [[NSScreen mainScreen] visibleFrame]];
 }
 
 - (void)bundleItemChooserDidSelectItems:(id)sender
@@ -443,7 +421,7 @@ BOOL HasDocumentWindow (NSArray* windows)
 	for(NSDictionary* item in [sender selectedItems])
 	{
 		if(OakIsAlternateKeyOrMouseEvent())
-				[[BundleEditor sharedInstance] revealBundleItem:bundles::lookup(to_s((NSString*)[item objectForKey:@"uuid"]))];
+				[[BundleEditor sharedInstance] revealBundleItem:bundles::lookup(to_s([item objectForKey:@"uuid"]))];
 		else	[NSApp sendAction:@selector(performBundleItemWithUUIDString:) to:nil from:[item objectForKey:@"uuid"]];
 	}
 }
@@ -486,16 +464,11 @@ BOOL HasDocumentWindow (NSArray* windows)
 	}
 	else if([item action] == @selector(performBundleItemWithUUIDStringFrom:))
 	{
-		if(bundles::item_ptr bundleItem = bundles::lookup(to_s((NSString*)item.representedObject)))
+		if(bundles::item_ptr bundleItem = bundles::lookup(to_s(item.representedObject)))
 		{
 			if(id textView = [NSApp targetForAction:@selector(hasSelection)])
 				[item updateTitle:[NSString stringWithCxxString:name_with_selection(bundleItem, [textView hasSelection])]];
 		}
-	}
-	else if([item action] == @selector(printDocument:))
-	{
-		NSView* webView = [NSApp targetForAction:@selector(print:)];
-		enabled = [webView isKindOfClass:[NSView class]] && [webView conformsToProtocol:@protocol(WebDocumentView)];
 	}
 	return enabled;
 }
@@ -506,9 +479,16 @@ BOOL HasDocumentWindow (NSArray* windows)
 	ASSERT([[sender selectedItems] count] == 1);
 
 	if(NSString* uuid = [[[sender selectedItems] lastObject] objectForKey:@"uuid"])
+	{
 		[[BundleEditor sharedInstance] revealBundleItem:bundles::lookup(to_s(uuid))];
-
-	self.filterWindowController = nil;
+	}
+	else if(NSString* path = [[[sender selectedItems] lastObject] objectForKey:@"file"])
+	{
+		document::document_ptr doc = document::create(to_s(path));
+		if(NSString* line = [[[sender selectedItems] lastObject] objectForKey:@"line"])
+			doc->set_selection(to_s(line));
+		document::show(doc);
+	}
 }
 
 - (void)editBundleItemWithUUIDString:(NSString*)uuidString
@@ -523,25 +503,5 @@ BOOL HasDocumentWindow (NSArray* windows)
 - (IBAction)runPageLayout:(id)sender
 {
 	[[NSPageLayout pageLayout] runModal];
-}
-
-- (void)printDocument:(id)sender
-{
-	NSView* webView = [NSApp targetForAction:@selector(print:)];
-	if([webView isKindOfClass:[NSView class]] && [webView conformsToProtocol:@protocol(WebDocumentView)])
-	{
-		NSPrintOperation* printer = [NSPrintOperation printOperationWithView:webView];
-		[[printer printPanel] setOptions:[[printer printPanel] options] | NSPrintPanelShowsPaperSize | NSPrintPanelShowsOrientation];
-
-		NSPrintInfo* info = [printer printInfo];
-
-		NSRect display = NSIntersectionRect(info.imageablePageBounds, (NSRect){ NSZeroPoint, info.paperSize });
-		info.leftMargin   = NSMinX(display);
-		info.rightMargin  = info.paperSize.width - NSMaxX(display);
-		info.topMargin    = info.paperSize.height - NSMaxY(display);
-		info.bottomMargin = NSMinY(display);
-
-		[printer runOperationModalForWindow:[webView window] delegate:nil didRunSelector:NULL contextInfo:nil];
-	}
 }
 @end

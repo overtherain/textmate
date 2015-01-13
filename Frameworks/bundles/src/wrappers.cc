@@ -129,7 +129,7 @@ namespace bundles
 	// = Scope Variables (“shellVariables”) =
 	// ======================================
 
-	static std::vector< std::pair<std::string, std::string> > parse_variables (item_ptr const& item)
+	std::vector< std::pair<std::string, std::string> > shell_variables (item_ptr const& item)
 	{
 		plist::array_t variables;
 		plist::get_key_path(item->plist(), "settings.shellVariables", variables);
@@ -154,7 +154,7 @@ namespace bundles
 		riterate(item, items)
 		{
 			stack.push_back(std::set<std::string>());
-			for(auto pair : parse_variables(*item))
+			for(auto pair : shell_variables(*item))
 			{
 				auto tmp = (*item)->bundle_variables();
 				res[pair.first] = format_string::expand(pair.second, tmp << res);
@@ -187,17 +187,51 @@ namespace bundles
 
 	plist::any_t value_for_setting (std::string const& setting, scope::context_t const& scope, item_ptr* match)
 	{
-		for(auto const& item : query(kFieldSettingName, setting, scope, kItemTypeSettings))
+		struct cache_t : bundles::callback_t
 		{
-			plist::any_t res;
+			cache_t ()
+			{
+				bundles::add_callback(this);
+			}
+
+			void bundles_did_change ()
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				map.clear();
+			}
+
+			std::map<std::string, item_ptr> map;
+			std::mutex mutex;
+		};
+
+		static cache_t cache;
+		std::lock_guard<std::mutex> lock(cache.mutex);
+
+		std::string const key = setting + "\037" + to_s(scope);
+		auto iter = cache.map.find(key);
+		if(iter == cache.map.end())
+		{
+			if(cache.map.size() > 1000)
+				cache.map.clear();
+
+			auto items = query(kFieldSettingName, setting, scope, kItemTypeSettings);
+			iter = cache.map.emplace(key, items.empty() ? item_ptr() : items.front()).first;
+		}
+
+		plist::any_t res;
+		if(item_ptr item = iter->second)
+		{
 			if(plist::get_key_path(item->plist(), "settings." + setting, res))
 			{
 				if(match)
 					*match = item;
-				return res;
+			}
+			else
+			{
+				fprintf(stderr, "*** missing setting ‘%s’ in %s\n", setting.c_str(), item->full_name().c_str());
 			}
 		}
-		return plist::any_t();
+		return res;
 	}
 
 	std::vector<item_ptr> drag_commands_for_path (std::string const& path, scope::context_t const& scope)

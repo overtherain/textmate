@@ -10,7 +10,6 @@
 #import <bundles/bundles.h>
 #import <OakFilterList/SymbolChooser.h>
 #import <OakFoundation/NSString Additions.h>
-#import <OakFoundation/NSArray Additions.h>
 #import <OakAppKit/OakAppKit.h>
 #import <OakAppKit/NSColor Additions.h>
 #import <OakAppKit/NSImage Additions.h>
@@ -43,9 +42,10 @@ static NSString* const kFoldingsColumnIdentifier  = @"foldings";
 	NSScrollView* gutterScrollView;
 	GutterView* gutterView;
 	NSColor* gutterDividerColor;
+	NSMutableDictionary* gutterImages;
 
-	NSBox* gutterDividerView;
-	NSBox* statusDividerView;
+	OakBackgroundFillView* gutterDividerView;
+	OakBackgroundFillView* statusDividerView;
 
 	NSScrollView* textScrollView;
 	OakTextView* textView;
@@ -59,9 +59,6 @@ static NSString* const kFoldingsColumnIdentifier  = @"foldings";
 	IBOutlet NSPanel* tabSizeSelectorPanel;
 }
 @property (nonatomic, readonly) OTVStatusBar* statusBar;
-@property (nonatomic) NSDictionary* gutterImages;
-@property (nonatomic) NSDictionary* gutterHoverImages;
-@property (nonatomic) NSDictionary* gutterPressedImages;
 @property (nonatomic) SymbolChooser* symbolChooser;
 @property (nonatomic) NSArray* observedKeys;
 - (void)updateStyle;
@@ -117,35 +114,28 @@ private:
 		textScrollView.autohidesScrollers    = YES;
 		textScrollView.borderType            = NSNoBorder;
 		textScrollView.documentView          = textView;
-		[self addSubview:textScrollView];
 
 		gutterView = [[GutterView alloc] initWithFrame:NSZeroRect];
 		gutterView.partnerView = textView;
 		gutterView.delegate    = self;
 		[gutterView insertColumnWithIdentifier:kBookmarksColumnIdentifier atPosition:0 dataSource:self delegate:self];
 		[gutterView insertColumnWithIdentifier:kFoldingsColumnIdentifier atPosition:2 dataSource:self delegate:self];
+		if([[NSUserDefaults standardUserDefaults] boolForKey:@"DocumentView Disable Line Numbers"])
+			[gutterView setVisibility:NO forColumnWithIdentifier:GVLineNumbersColumnIdentifier];
+		[gutterView setTranslatesAutoresizingMaskIntoConstraints:NO];
 
 		gutterScrollView = [[OakDisableAccessibilityScrollView alloc] initWithFrame:NSZeroRect];
 		gutterScrollView.borderType   = NSNoBorder;
 		gutterScrollView.documentView = gutterView;
-		[self addSubview:gutterScrollView];
-
-		if([[NSUserDefaults standardUserDefaults] boolForKey:@"DocumentView Disable Line Numbers"])
-			[gutterView setVisibility:NO forColumnWithIdentifier:GVLineNumbersColumnIdentifier];
 
 		gutterDividerView = OakCreateVerticalLine(nil);
-		[self addSubview:gutterDividerView];
-
 		statusDividerView = OakCreateHorizontalLine([NSColor colorWithCalibratedWhite:0.500 alpha:1], [NSColor colorWithCalibratedWhite:0.750 alpha:1]);
-		[self addSubview:statusDividerView];
 
 		statusBar = [[OTVStatusBar alloc] initWithFrame:NSZeroRect];
 		statusBar.delegate = self;
 		statusBar.target = self;
-		[self addSubview:statusBar];
 
-		for(NSView* view in @[ gutterScrollView, gutterView, gutterDividerView, textScrollView, statusDividerView, statusBar ])
-			[view setTranslatesAutoresizingMaskIntoConstraints:NO];
+		OakAddAutoLayoutViewsToSuperview(@[ gutterScrollView, gutterDividerView, textScrollView, statusDividerView, statusBar ], self);
 
 		document::document_ptr doc = document::from_content("", "text.plain"); // file type is only to avoid potential “no grammar” warnings in console
 		doc->set_custom_name("null document"); // without a name it grabs an ‘untitled’ token
@@ -213,61 +203,59 @@ private:
 	else
 	{
 		statusDividerView = OakCreateHorizontalLine([NSColor colorWithCalibratedWhite:0.500 alpha:1], [NSColor colorWithCalibratedWhite:0.750 alpha:1]);
-		[self addSubview:statusDividerView];
 
 		statusBar = [[OTVStatusBar alloc] initWithFrame:NSZeroRect];
 		statusBar.delegate = self;
 		statusBar.target = self;
-		[self addSubview:statusBar];
+
+		OakAddAutoLayoutViewsToSuperview(@[ statusDividerView, statusBar ], self);
 	}
 	[self setNeedsUpdateConstraints:YES];
 }
 
+- (CGFloat)lineHeight
+{
+	return round(std::min(1.5 * [textView.font capHeight], [textView.font ascender] - [textView.font descender] + [textView.font leading]));
+}
+
 - (NSImage*)gutterImage:(NSString*)aName
 {
-	if(NSImage* res = [[NSImage imageNamed:aName inSameBundleAsClass:[self class]] copy])
+	id res = gutterImages[aName];
+	if(!res)
 	{
-		// We use capHeight instead of x-height since most fonts have the numbers
-		// extend to this height, so centering around the x-height would look off
-		CGFloat height = [gutterView.lineNumberFont capHeight];
-		CGFloat width = [res size].width * height / [res size].height;
+		gutterImages = gutterImages ?: [NSMutableDictionary new];
 
-		CGFloat scaleFactor = 1;
+		if(NSImage* image = [aName hasPrefix:@"/"] ? [[NSImage alloc] initWithContentsOfFile:aName] : [NSImage imageNamed:aName inSameBundleAsClass:[self class]])
+		{
+			CGFloat imageWidth  = image.size.width;
+			CGFloat imageHeight = image.size.height;
 
-		// Since all images are vector based and don’t contain any spacing to
-		// align it, we need to set the individual scaleFactor per image.
-		if([aName hasPrefix:@"Bookmark"]) scaleFactor = 1.0;
-		if([aName hasPrefix:@"Folding"])  scaleFactor = 1.5;
-		if([aName hasPrefix:@"Search"])   scaleFactor = 1.2;
+			CGFloat viewWidth   = [self widthForColumnWithIdentifier:nil];
+			CGFloat viewHeight  = self.lineHeight;
 
-		[res setSize:NSMakeSize(round(width * scaleFactor), round(height * scaleFactor))];
+			res = image = [image copy];
 
-		return res;
+			if(imageWidth / imageHeight < viewWidth / viewHeight)
+					image.size = NSMakeSize(round(viewHeight * imageWidth / imageHeight), viewHeight);
+			else	image.size = NSMakeSize(viewWidth, round(viewWidth * imageHeight / imageWidth));
+		}
+		else
+		{
+			res = [NSNull null];
+			NSLog(@"%s no image named ‘%@’", sel_getName(_cmd), aName);
+		}
+
+		gutterImages[aName] = res;
 	}
-	NSLog(@"%s no image named ‘%@’", sel_getName(_cmd), aName);
-	return nil;
+	return res == [NSNull null] ? nil : res;
 }
 
 - (void)setFont:(NSFont*)newFont
 {
+	gutterImages = nil; // force image sizes to be recalculated
+
 	textView.font = newFont;
 	gutterView.lineNumberFont = [NSFont fontWithName:[newFont fontName] size:round(0.8 * [newFont pointSize])];
-
-	self.gutterImages = @{
-		kBookmarksColumnIdentifier : @[ [NSNull null], [self gutterImage:@"Bookmark"], [self gutterImage:@"Search Mark"] ],
-		kFoldingsColumnIdentifier  : @[ [NSNull null], [self gutterImage:@"Folding Top"], [self gutterImage:@"Folding Collapsed"], [self gutterImage:@"Folding Bottom"] ],
-	};
-
-	self.gutterHoverImages = @{
-		kBookmarksColumnIdentifier : @[ [self gutterImage:@"Bookmark Hover Add"], [self gutterImage:@"Bookmark Hover Remove"], [self gutterImage:@"Bookmark Hover Add"] ],
-		kFoldingsColumnIdentifier  : @[ [NSNull null], [self gutterImage:@"Folding Top Hover"], [self gutterImage:@"Folding Collapsed Hover"], [self gutterImage:@"Folding Bottom Hover"] ],
-	};
-
-	self.gutterPressedImages = @{
-		kBookmarksColumnIdentifier : @[ [self gutterImage:@"Bookmark"], [self gutterImage:@"Bookmark"], [self gutterImage:@"Bookmark"] ],
-		kFoldingsColumnIdentifier  : @[ [NSNull null], [self gutterImage:@"Folding Top Hover"], [self gutterImage:@"Folding Collapsed Hover"], [self gutterImage:@"Folding Bottom Hover"] ],
-	};
-
 	[gutterView reloadData:self];
 }
 
@@ -276,7 +264,7 @@ private:
 
 - (void)changeFont:(id)sender
 {
-	if(NSFont* newFont = [sender convertFont:textView.font])
+	if(NSFont* newFont = [sender convertFont:textView.font ?: [NSFont userFixedPitchFontOfSize:0]])
 	{
 		settings_t::set(kSettingsFontNameKey, to_s([newFont fontName]));
 		settings_t::set(kSettingsFontSizeKey, [newFont pointSize]);
@@ -410,7 +398,7 @@ private:
 		gutterView.selectionIconPressedColor = [NSColor tmColorWithCGColor:styles.selectionIconsPressed];
 		gutterView.selectionBorderColor      = [NSColor tmColorWithCGColor:styles.selectionBorder];
 		gutterScrollView.backgroundColor     = gutterView.backgroundColor;
-		gutterDividerView.borderColor        = [NSColor tmColorWithCGColor:styles.divider];
+		gutterDividerView.activeBackgroundColor = [NSColor tmColorWithCGColor:styles.divider];
 
 		[gutterView setNeedsDisplay:YES];
 	}
@@ -463,11 +451,11 @@ private:
 	}
 	else if([aMenuItem action] == @selector(toggleCurrentBookmark:))
 	{
-		text::selection_t sel([textView.selectionString UTF8String]);
+		text::selection_t sel(to_s(textView.selectionString));
 		size_t lineNumber = sel.last().max().line;
 
 		ng::buffer_t const& buf = document->buffer();
-		[aMenuItem setTitle:buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), kBookmarkType).empty() ? @"Set Bookmark" : @"Remove Bookmark"];
+		[aMenuItem setTitle:buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), document::kBookmarkIdentifier).empty() ? @"Set Bookmark" : @"Remove Bookmark"];
 	}
 	return YES;
 }
@@ -478,14 +466,12 @@ private:
 
 - (void)addAuxiliaryView:(NSView*)aView atEdge:(NSRectEdge)anEdge
 {
-	[aView setTranslatesAutoresizingMaskIntoConstraints:NO];
-
 	topAuxiliaryViews    = topAuxiliaryViews    ?: [NSMutableArray new];
 	bottomAuxiliaryViews = bottomAuxiliaryViews ?: [NSMutableArray new];
 	if(anEdge == NSMinYEdge)
 			[bottomAuxiliaryViews addObject:aView];
 	else	[topAuxiliaryViews addObject:aView];
-	[self addSubview:aView];
+	OakAddAutoLayoutViewsToSuperview(@[ aView ], self);
 	[self setNeedsUpdateConstraints:YES];
 }
 
@@ -507,14 +493,14 @@ private:
 
 - (void)showClipboardHistory:(id)sender
 {
-	OakPasteboardChooser* chooser = [[OakPasteboardChooser alloc] initWithPasteboard:[OakPasteboard pasteboardWithName:NSGeneralPboard]];
+	OakPasteboardChooser* chooser = [OakPasteboardChooser sharedChooserForName:NSGeneralPboard];
 	chooser.action = @selector(paste:);
 	[chooser showWindowRelativeToFrame:[self.window convertRectToScreen:[textView convertRect:[textView visibleRect] toView:nil]]];
 }
 
 - (void)showFindHistory:(id)sender
 {
-	OakPasteboardChooser* chooser = [[OakPasteboardChooser alloc] initWithPasteboard:[OakPasteboard pasteboardWithName:NSFindPboard]];
+	OakPasteboardChooser* chooser = [OakPasteboardChooser sharedChooserForName:NSFindPboard];
 	chooser.action = @selector(findNext:);
 	[chooser showWindowRelativeToFrame:[self.window convertRectToScreen:[textView convertRect:[textView visibleRect] toView:nil]]];
 }
@@ -577,7 +563,7 @@ private:
 
 - (void)takeGrammarUUIDFrom:(id)sender
 {
-	if(bundles::item_ptr item = bundles::lookup(to_s((NSString*)[sender representedObject])))
+	if(bundles::item_ptr item = bundles::lookup(to_s([sender representedObject])))
 		[textView performBundleItem:item];
 }
 
@@ -592,7 +578,7 @@ private:
 	[symbolMenu removeAllItems];
 
 	ng::buffer_t const& buf = document->buffer();
-	text::selection_t sel([textView.selectionString UTF8String]);
+	text::selection_t sel(to_s(textView.selectionString));
 	size_t i = buf.convert(sel.last().max());
 
 	NSInteger index = 0;
@@ -727,45 +713,44 @@ private:
 // = GutterView DataSource =
 // =========================
 
-enum bookmark_state_t { kBookmarkNoMark, kBookmarkRegularMark, kBookmarkSearchMark };
+- (CGFloat)widthForColumnWithIdentifier:(id)columnIdentifier
+{
+	return floor((self.lineHeight-1) / 2) * 2 + 1;
+}
 
-static std::string const kBookmarkType   = "bookmark";
-static std::string const kSearchmarkType = "search";
-
-- (NSUInteger)stateForColumnWithIdentifier:(id)columnIdentifier atLine:(NSUInteger)lineNumber
+- (NSImage*)imageForLine:(NSUInteger)lineNumber inColumnWithIdentifier:(id)columnIdentifier state:(GutterViewRowState)rowState
 {
 	if([columnIdentifier isEqualToString:kBookmarksColumnIdentifier])
 	{
+		std::map<size_t, std::string> gutterImageName;
+
 		ng::buffer_t const& buf = document->buffer();
-		if(!buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), kBookmarkType).empty())
-			return kBookmarkRegularMark;
-		if(!buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), kSearchmarkType).empty())
-			return kBookmarkSearchMark;
-		return kBookmarkNoMark;
+		for(auto const& pair : buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber)))
+		{
+			if(!pair.second.second.empty())
+				gutterImageName.emplace(0, pair.second.first);
+			else if(pair.second.first == document::kBookmarkIdentifier)
+				gutterImageName.emplace(1, rowState != GutterViewRowStateRegular ? "Bookmark Hover Remove" : "Bookmark");
+			else if(rowState == GutterViewRowStateRegular)
+				gutterImageName.emplace(2, pair.second.first);
+		}
+
+		if(rowState != GutterViewRowStateRegular)
+			gutterImageName.emplace(3, "Bookmark Hover Add");
+
+		if(!gutterImageName.empty())
+			return [self gutterImage:[NSString stringWithCxxString:gutterImageName.begin()->second]];
 	}
 	else if([columnIdentifier isEqualToString:kFoldingsColumnIdentifier])
 	{
-		return [textView foldingStateForLine:lineNumber];
+		switch([textView foldingStateForLine:lineNumber])
+		{
+			case kFoldingTop:       return [self gutterImage:rowState == GutterViewRowStateRegular ? @"Folding Top"       : @"Folding Top Hover"];
+			case kFoldingCollapsed: return [self gutterImage:rowState == GutterViewRowStateRegular ? @"Folding Collapsed" : @"Folding Collapsed Hover"];
+			case kFoldingBottom:    return [self gutterImage:rowState == GutterViewRowStateRegular ? @"Folding Bottom"    : @"Folding Bottom Hover"];
+		}
 	}
-	return 0;
-}
-
-- (NSImage*)imageForState:(NSUInteger)state forColumnWithIdentifier:(id)identifier
-{
-	NSArray* array = _gutterImages[identifier];
-	return [array safeObjectAtIndex:state];
-}
-
-- (NSImage*)hoverImageForState:(NSUInteger)state forColumnWithIdentifier:(id)identifier
-{
-	NSArray* array = _gutterHoverImages[identifier];
-	return [array safeObjectAtIndex:state];
-}
-
-- (NSImage*)pressedImageForState:(NSUInteger)state forColumnWithIdentifier:(id)identifier
-{
-	NSArray* array = _gutterPressedImages[identifier];
-	return [array safeObjectAtIndex:state];
+	return nil;
 }
 
 // =============================
@@ -781,7 +766,7 @@ static std::string const kSearchmarkType = "search";
 - (void)updateBookmarksMenu:(NSMenu*)aMenu
 {
 	ng::buffer_t& buf = document->buffer();
-	std::map<size_t, std::string> const& marks = buf.get_marks(0, buf.size(), kBookmarkType);
+	std::map<size_t, std::string> const& marks = buf.get_marks(0, buf.size(), document::kBookmarkIdentifier);
 	for(auto const& pair : marks)
 	{
 		size_t n = buf.convert(pair.first).line;
@@ -803,13 +788,42 @@ static std::string const kSearchmarkType = "search";
 	if([columnIdentifier isEqualToString:kBookmarksColumnIdentifier])
 	{
 		ng::buffer_t& buf = document->buffer();
-		std::map<size_t, std::string> const& marks = buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), kBookmarkType);
-		for(auto const& pair : marks)
+
+		std::vector<std::string> info;
+		for(auto const& pair : buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber)))
 		{
-			if(pair.second == kBookmarkType)
-				return buf.remove_mark(buf.begin(lineNumber) + pair.first, pair.second);
+			if(!pair.second.second.empty())
+				info.push_back(pair.second.second);
 		}
-		buf.set_mark(buf.begin(lineNumber), kBookmarkType);
+
+		if(info.empty())
+		{
+			for(auto const& pair : buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), document::kBookmarkIdentifier))
+				return buf.remove_mark(pair.first, document::kBookmarkIdentifier);
+			buf.set_mark(buf.begin(lineNumber), document::kBookmarkIdentifier);
+		}
+		else
+		{
+			NSView* popoverContainerView = [[NSView alloc] initWithFrame:NSZeroRect];
+
+			NSTextField* textField = OakCreateLabel([NSString stringWithCxxString:text::join(info, "\n")]);
+			OakAddAutoLayoutViewsToSuperview(@[ textField ], popoverContainerView);
+
+			NSDictionary* views = NSDictionaryOfVariableBindings(textField);
+			[popoverContainerView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|-(5)-[textField]-(5)-|" options:0 metrics:0 views:views]];
+			[popoverContainerView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|-(10)-[textField]-(10)-|" options:0 metrics:0 views:views]];
+
+			NSViewController* viewController = [NSViewController new];
+			viewController.view = popoverContainerView;
+
+			NSPopover* popover = [NSPopover new];
+			popover.behavior = NSPopoverBehaviorTransient;
+			popover.contentViewController = viewController;
+
+			GVLineRecord record = [self lineFragmentForLine:lineNumber column:0];
+			NSRect rect = NSMakeRect(0, record.firstY, [self widthForColumnWithIdentifier:columnIdentifier], record.lastY - record.firstY);
+			[popover showRelativeToRect:rect ofView:gutterView preferredEdge:NSMaxXEdge];
+		}
 	}
 	else if([columnIdentifier isEqualToString:kFoldingsColumnIdentifier])
 	{
@@ -826,52 +840,48 @@ static std::string const kSearchmarkType = "search";
 {
 	ng::buffer_t& buf = document->buffer();
 
-	text::selection_t sel([textView.selectionString UTF8String]);
+	text::selection_t sel(to_s(textView.selectionString));
 	size_t lineNumber = sel.last().max().line;
 
 	std::vector<size_t> toRemove;
-	std::map<size_t, std::string> const& marks = buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), kBookmarkType);
-	for(auto const& pair : marks)
-	{
-		if(pair.second == kBookmarkType)
-			toRemove.push_back(buf.begin(lineNumber) + pair.first);
-	}
+	for(auto const& pair : buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), document::kBookmarkIdentifier))
+		toRemove.push_back(pair.first);
 
 	if(toRemove.empty())
 	{
-		buf.set_mark(buf.convert(sel.last().max()), kBookmarkType);
+		buf.set_mark(buf.convert(sel.last().max()), document::kBookmarkIdentifier);
 	}
 	else
 	{
 		for(auto const& index : toRemove)
-			buf.remove_mark(index, kBookmarkType);
+			buf.remove_mark(index, document::kBookmarkIdentifier);
 	}
 	[[NSNotificationCenter defaultCenter] postNotificationName:GVColumnDataSourceDidChange object:self];
 }
 
 - (IBAction)goToNextBookmark:(id)sender
 {
-	text::selection_t sel([textView.selectionString UTF8String]);
+	text::selection_t sel(to_s(textView.selectionString));
 
 	ng::buffer_t const& buf = document->buffer();
-	std::pair<size_t, std::string> const& pair = buf.next_mark(buf.convert(sel.last().max()), kBookmarkType);
+	std::pair<size_t, std::string> const& pair = buf.next_mark(buf.convert(sel.last().max()), document::kBookmarkIdentifier);
 	if(pair.second != NULL_STR)
 		textView.selectionString = [NSString stringWithCxxString:buf.convert(pair.first)];
 }
 
 - (IBAction)goToPreviousBookmark:(id)sender
 {
-	text::selection_t sel([textView.selectionString UTF8String]);
+	text::selection_t sel(to_s(textView.selectionString));
 
 	ng::buffer_t const& buf = document->buffer();
-	std::pair<size_t, std::string> const& pair = buf.prev_mark(buf.convert(sel.last().max()), kBookmarkType);
+	std::pair<size_t, std::string> const& pair = buf.prev_mark(buf.convert(sel.last().max()), document::kBookmarkIdentifier);
 	if(pair.second != NULL_STR)
 		textView.selectionString = [NSString stringWithCxxString:buf.convert(pair.first)];
 }
 
 - (void)clearAllBookmarks:(id)sender
 {
-	document->buffer().remove_all_marks(kBookmarkType);
+	document->buffer().remove_all_marks(document::kBookmarkIdentifier);
 	[[NSNotificationCenter defaultCenter] postNotificationName:GVColumnDataSourceDidChange object:self];
 }
 
@@ -929,13 +939,13 @@ static std::string const kSearchmarkType = "search";
 
 	std::shared_ptr<ng::layout_t> layout;
 	std::vector<CGRect> pageRects;
+
+	BOOL _needsLayout;
 }
 @property (nonatomic) CGFloat pageWidth;
 @property (nonatomic) CGFloat pageHeight;
 @property (nonatomic) CGFloat fontScale;
 @property (nonatomic) NSString* themeUUID;
-
-@property (nonatomic) BOOL needsLayout;
 @end
 
 @implementation OakPrintDocumentView
@@ -975,7 +985,7 @@ static std::string const kSearchmarkType = "search";
 	self.fontScale  = [[[info dictionary] objectForKey:NSPrintScalingFactor] floatValue];
 	self.themeUUID  = [[info dictionary] objectForKey:@"OakPrintThemeUUID"];
 
-	[self layoutIfNeeded];
+	[self updateLayout];
 	[self setFrame:NSMakeRect(0, 0, self.pageWidth, layout->height())];
 
 	range->location = 1;
@@ -994,12 +1004,12 @@ static std::string const kSearchmarkType = "search";
 {
 	NSEraseRect(aRect);
 	if(![NSGraphicsContext currentContextDrawingToScreen] && layout)
-		layout->draw((CGContextRef)[[NSGraphicsContext currentContext] graphicsPort], aRect, [self isFlipped], /* show invisibles: */ false, /* selection: */ ng::ranges_t(), /* highlight: */ ng::ranges_t(), /* draw background: */ false);
+		layout->draw((CGContextRef)[[NSGraphicsContext currentContext] graphicsPort], aRect, [self isFlipped], /* selection: */ ng::ranges_t(), /* highlight: */ ng::ranges_t(), /* draw background: */ false);
 }
 
-- (void)layoutIfNeeded
+- (void)updateLayout
 {
-	if(!self.needsLayout)
+	if(!_needsLayout)
 		return;
 
 	pageRects.clear();
@@ -1026,7 +1036,7 @@ static std::string const kSearchmarkType = "search";
 		pageRect.size.height = self.pageHeight;
 	}
 
-	self.needsLayout = NO;
+	_needsLayout = NO;
 }
 
 - (void)setPageWidth:(CGFloat)newPageWidth    { if(_pageWidth  != newPageWidth)  { _needsLayout = YES; _pageWidth  = newPageWidth;  } }
@@ -1051,7 +1061,6 @@ static std::string const kSearchmarkType = "search";
 	if((self = [super init]))
 	{
 		NSView* contentView = [[NSView alloc] initWithFrame:NSZeroRect];
-		[contentView setTranslatesAutoresizingMaskIntoConstraints:NO];
 
 		NSTextField* themesLabel = OakCreateLabel(@"Theme:");
 		NSPopUpButton* themes    = OakCreatePopUpButton();
@@ -1082,11 +1091,7 @@ static std::string const kSearchmarkType = "search";
 			@"printHeaders" : printHeaders
 		};
 
-		for(NSView* view in [views allValues])
-		{
-			[view setTranslatesAutoresizingMaskIntoConstraints:NO];
-			[contentView addSubview:view];
-		}
+		OakAddAutoLayoutViewsToSuperview([views allValues], contentView);
 
 		NSMutableArray* constraints = [NSMutableArray array];
 		CONSTRAINT(@"H:|-[themesLabel]-[themes]-|",  NSLayoutFormatAlignAllBaseline);
@@ -1094,6 +1099,7 @@ static std::string const kSearchmarkType = "search";
 		CONSTRAINT(@"V:|-[themes]-[printHeaders]-|", NSLayoutFormatAlignAllLeft);
 		[contentView addConstraints:constraints];
 
+		contentView.frame = (NSRect){ NSZeroPoint, [contentView fittingSize] };
 		self.view = contentView;
 	}
 	return self;

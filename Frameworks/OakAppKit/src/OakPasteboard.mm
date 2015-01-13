@@ -1,6 +1,5 @@
 #import "OakPasteboard.h"
 #import "OakPasteboardSelector.h"
-#import <OakFoundation/NSArray Additions.h>
 #import <crash/info.h>
 #import <ns/ns.h>
 #import <oak/oak.h>
@@ -88,7 +87,6 @@ NSString* const kUserDefaultsDisablePersistentClipboardHistory = @"disablePersis
 @end
 
 @interface OakPasteboard ()
-@property (nonatomic) NSString* name;
 @property (nonatomic) NSInteger changeCount;
 @property (nonatomic) BOOL disableSystemPasteboardUpdating;
 @property (nonatomic) BOOL needsSavePasteboardHistory;
@@ -586,7 +584,7 @@ static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
 
 - (void)selectItemForControl:(NSView*)controlView
 {
-	NSPoint origin = [[controlView window] convertBaseToScreen:[controlView frame].origin];
+	NSPoint origin = [[controlView window] convertRectToScreen:[controlView frame]].origin;
 	[self selectItemAtPosition:origin withWidth:[controlView frame].size.width respondToSingleClick:YES];
 }
 @end

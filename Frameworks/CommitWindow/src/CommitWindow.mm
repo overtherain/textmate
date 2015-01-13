@@ -15,6 +15,7 @@
 #import <text/parse.h>
 #import <ns/ns.h>
 #import <oak/oak.h>
+#import <plist/uuid.h>
 
 @interface actionCommandObj : NSObject
 @property (nonatomic, readonly) NSString* name;
@@ -49,7 +50,7 @@ static std::map<std::string, std::string> convert (NSDictionary* dict)
 {
 	std::map<std::string, std::string> res;
 	for(NSString* key in dict)
-		res[[key UTF8String]] = [[dict objectForKey:key] UTF8String];
+		res[to_s(key)] = to_s(dict[key]);
 	return res;
 }
 
@@ -70,10 +71,16 @@ static std::string absolute_path_for_tool (std::string const& tool, std::map<std
 	return tool;
 }
 
+static NSString* const kOakCommitWindowShowFileList = @"showFileListInCommitWindow";
 static NSString* const kOakCommitWindowCommitMessages = @"commitMessages";
 
 static NSUInteger const kOakCommitWindowCommitMessagesTitleLength = 30;
 static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
+
+static CGFloat const kOakCommitWindowMinimumDocumentViewHeight = 195;
+static CGFloat const kOakCommitWindowTableViewHeight = 190;
+
+static void* kOakCommitWindowIncludeItemBinding = &kOakCommitWindowIncludeItemBinding;
 
 @interface OakCommitWindow : NSWindowController <NSWindowDelegate, NSTableViewDelegate, NSMenuDelegate, OakTextViewDelegate>
 @property (nonatomic) NSMutableDictionary*               options;
@@ -81,11 +88,28 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 @property (nonatomic) std::map<std::string, std::string> environment;
 @property (nonatomic) NSArrayController*                 arrayController;
 @property (nonatomic) NSString*                          clientPortName;
+
 @property (nonatomic) NSPopUpButton*                     previousCommitMessagesPopUpButton;
 @property (nonatomic) OakDocumentView*                   documentView;
+@property (nonatomic) NSLayoutConstraint*                documentViewHeightConstraint;
 @property (nonatomic) NSScrollView*                      scrollView;
+@property (nonatomic) NSLayoutConstraint*                scrollViewHeightConstraint;
 @property (nonatomic) NSTableView*                       tableView;
+
+@property (nonatomic) NSView*                            topDocumentViewDivider;
+@property (nonatomic) NSView*                            bottomDocumentViewDivider;
+@property (nonatomic) NSView*                            topScrollViewDivider;
+@property (nonatomic) NSView*                            bottomScrollViewDivider;
+
+@property (nonatomic) NSButton*                          showTableButton;
 @property (nonatomic) NSPopUpButton*                     actionPopUpButton;
+@property (nonatomic) NSButton*                          commitButton;
+@property (nonatomic) NSButton*                          cancelButton;
+
+@property (nonatomic) BOOL                               showsTableView;
+@property (nonatomic) NSArray*                           scrollViewConstraints;
+@property (nonatomic) NSArray*                           bottomButtonsConstraints;
+
 @property (nonatomic) OakCommitWindow*                   retainedSelf;
 @end
 
@@ -98,63 +122,42 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 		[self parseArguments:someOptions[kOakCommitWindowArguments]];
 		self.environment = convert(someOptions[kOakCommitWindowEnvironment]);
 
+		// send all diffs to a separate window
+		_environment["TM_PROJECT_UUID"] = to_s(oak::uuid_t().generate());
+
+		_showsTableView = [[NSUserDefaults standardUserDefaults] boolForKey:kOakCommitWindowShowFileList];
+
 		self.documentView = [[OakDocumentView alloc] initWithFrame:NSZeroRect];
+		self.documentView.hideStatusBar     = YES;
 		self.documentView.textView.delegate = self;
 
-		_arrayController = [[NSArrayController alloc] init];
-		_arrayController.objectClass = [CWItem class];
+		[self setupArrayController];
 
 		[CWStatusStringTransformer register];
 
-		NSTableColumn* tableColumn = [[NSTableColumn alloc] initWithIdentifier:@"path"];
-		tableColumn.editable = NO;
-
-		NSTableView* tableView = [[NSTableView alloc] initWithFrame:NSZeroRect];
-		[tableView addTableColumn:tableColumn];
-		tableView.headerView                         = nil;
-		tableView.focusRingType                      = NSFocusRingTypeNone;
-		tableView.usesAlternatingRowBackgroundColors = YES;
-		tableView.doubleAction                       = @selector(didDoubleClickTableView:);
-		tableView.target                             = self;
-		tableView.delegate                           = self;
-		tableView.menu                               = [NSMenu new];
-		tableView.menu.delegate                      = self;
-		_tableView                                   = tableView;
-
-		[self populateTableView];
-		[_tableView bind:NSContentBinding toObject:_arrayController withKeyPath:@"arrangedObjects" options:0];
-
-		_scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-		_scrollView.hasVerticalScroller   = YES;
-		_scrollView.hasHorizontalScroller = NO;
-		_scrollView.autohidesScrollers    = YES;
-		_scrollView.borderType            = NSNoBorder;
-		_scrollView.documentView          = _tableView;
-
-		self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 540, 500) styleMask:(NSTitledWindowMask|NSClosableWindowMask|NSResizableWindowMask|NSMiniaturizableWindowMask|NSTexturedBackgroundWindowMask) backing:NSBackingStoreBuffered defer:NO];
-		[self.window center];
+		self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 600, 350) styleMask:NSTitledWindowMask|NSResizableWindowMask backing:NSBackingStoreBuffered defer:NO];
 		self.window.delegate           = self;
 		self.window.releasedWhenClosed = NO;
 		self.window.frameAutosaveName  = @"Commit Window";
-		[self.window setAutorecalculatesContentBorderThickness:NO forEdge:NSMaxYEdge];
-		[self.window setContentBorderThickness:29 forEdge:NSMaxYEdge];
 
-		NSButton* commitButton = OakCreateButton(@"Commit", NSTexturedRoundedBezelStyle);
-		NSButton* cancelButton = OakCreateButton(@"Cancel", NSTexturedRoundedBezelStyle);
+		_commitButton = OakCreateButton(@"Commit", NSRoundedBezelStyle);
+		_commitButton.action                    = @selector(performCommit:);
+		_commitButton.keyEquivalent             = @"\r";
+		_commitButton.keyEquivalentModifierMask = NSCommandKeyMask;
+		_commitButton.target                    = self;
 
-		commitButton.action                    = @selector(performCommit:);
-		commitButton.keyEquivalent             = @"\r";
-		commitButton.keyEquivalentModifierMask = NSCommandKeyMask;
-		commitButton.target                    = self;
+		_cancelButton = OakCreateButton(@"Cancel", NSRoundedBezelStyle);
+		_cancelButton.action                    = @selector(cancel:);
+		_cancelButton.keyEquivalent             = @".";
+		_cancelButton.keyEquivalentModifierMask = NSCommandKeyMask;
+		_cancelButton.target                    = self;
 
-		cancelButton.action                    = @selector(cancel:);
-		cancelButton.keyEquivalent             = @".";
-		cancelButton.keyEquivalentModifierMask = NSCommandKeyMask;
-		cancelButton.target                    = self;
-
-		_actionPopUpButton = OakCreateActionPopUpButton(YES);
-		_actionPopUpButton.bezelStyle = NSTexturedRoundedBezelStyle;
-		_actionPopUpButton.menu.delegate = self;
+		_showTableButton = [[NSButton alloc] initWithFrame:NSZeroRect];
+		_showTableButton.buttonType = NSOnOffButton;
+		_showTableButton.bezelStyle = NSRoundedDisclosureBezelStyle;
+		_showTableButton.title = @"";
+		_showTableButton.action = @selector(toggleTableView:);
+		_showTableButton.state = _showsTableView ? NSOnState : NSOffState;
 
 		_previousCommitMessagesPopUpButton = [NSPopUpButton new];
 		_previousCommitMessagesPopUpButton.bordered   = YES;
@@ -162,44 +165,224 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 		_previousCommitMessagesPopUpButton.bezelStyle = NSTexturedRoundedBezelStyle;
 		[self setupPreviousCommitMessagesMenu];
 
-		// ===============
-		// = Constraints =
-		// ===============
-
-		NSDictionary* views = @{
-			@"previousMessages"   : self.previousCommitMessagesPopUpButton,
-			@"topDivider"         : OakCreateHorizontalLine([NSColor grayColor], [NSColor lightGrayColor]),
-			@"documentView"       : self.documentView,
-			@"middleDivider"      : OakCreateHorizontalLine([NSColor grayColor], [NSColor lightGrayColor]),
-			@"scrollView"         : self.scrollView,
-			@"bottomDivider"      : OakCreateHorizontalLine([NSColor grayColor], [NSColor lightGrayColor]),
-			@"action"             : self.actionPopUpButton,
-			@"cancel"             : cancelButton,
-			@"commit"             : commitButton,
-		};
+		_topDocumentViewDivider    = OakCreateHorizontalLine([NSColor grayColor]);
+		_bottomDocumentViewDivider = OakCreateHorizontalLine([NSColor grayColor]);
 
 		NSView* contentView = self.window.contentView;
-		for(NSView* view in [views allValues])
+		OakAddAutoLayoutViewsToSuperview([self.allViews allValues], contentView);
+
+		NSDictionary* views = self.allViews;
+		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:[previousMessages(>=200)]-(20)-|" options:0 metrics:nil views:views]];
+		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[documentView(>=400,==topDocumentViewDivider,==bottomDocumentViewDivider)]|" options:0 metrics:nil views:views]];
+		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|-(20)-[showTableButton]" options:0 metrics:nil views:views]];
+		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|-(12)-[previousMessages]-(12)-[topDocumentViewDivider][documentView][bottomDocumentViewDivider]-(12)-[showTableButton]" options:0 metrics:nil views:views]];
+
+		if(self.showsTableView)
 		{
-			[view setTranslatesAutoresizingMaskIntoConstraints:NO];
-			[contentView addSubview:view];
+			[self showTableViewAnimated:NO];
+		}
+		else
+		{
+			_documentViewHeightConstraint = [NSLayoutConstraint constraintWithItem:_documentView attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationGreaterThanOrEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:kOakCommitWindowMinimumDocumentViewHeight];
+			[self.window.contentView addConstraint:_documentViewHeightConstraint];
+			[self setupBottomButtonsConstraints];
 		}
 
-		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[topDivider]|" options:NSLayoutFormatAlignAllLeft|NSLayoutFormatAlignAllRight metrics:nil views:views]];
-		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[documentView(==middleDivider)]|" options:0 metrics:nil views:views]];
-		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[scrollView(==bottomDivider)]|" options:0 metrics:nil views:views]];
-		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:[cancel]-[commit]-(8)-|" options:NSLayoutFormatAlignAllBaseline metrics:nil views:views]];
-		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|-(8)-[action(==36)]" options:0 metrics:nil views:views]];
-		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:[previousMessages(>=200)]-(8)-|" options:0 metrics:nil views:views]];
-		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|-(3)-[previousMessages]-(3)-[topDivider][documentView(>=100)][middleDivider][scrollView(==190)][bottomDivider]-(5)-[commit]-(6)-|" options:0 metrics:nil views:views]];
-		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:[bottomDivider]-(5)-[action]-(6)-|" options:0 metrics:nil views:views]];
+		[_arrayController addObserver:self forKeyPath:@"arrangedObjects.commit" options:NSKeyValueObservingOptionInitial|NSKeyValueObservingOptionNew context:kOakCommitWindowIncludeItemBinding];
 	}
 	return self;
 }
 
+- (void)dealloc
+{
+	[self.arrayController removeObserver:self forKeyPath:@"arrangedObjects.commit"];
+}
+
+- (NSDictionary*)allViews
+{
+	NSDictionary* views = @{
+		@"previousMessages"          : self.previousCommitMessagesPopUpButton,
+		@"topDocumentViewDivider"    : self.topDocumentViewDivider,
+		@"documentView"              : self.documentView,
+		@"bottomDocumentViewDivider" : self.bottomDocumentViewDivider,
+		@"topScrollViewDivider"      : self.topScrollViewDivider ?: [NSNull null],
+		@"scrollView"                : self.scrollView ?: [NSNull null],
+		@"bottomScrollViewDivider"   : self.bottomScrollViewDivider ?: [NSNull null],
+		@"showTableButton"           : self.showTableButton,
+		@"action"                    : self.actionPopUpButton ?: [NSNull null],
+		@"cancel"                    : self.cancelButton,
+		@"commit"                    : self.commitButton,
+	};
+
+	return views;
+}
+
+- (void)setupBottomButtonsConstraints
+{
+	NSView* contentView = self.window.contentView;
+
+	if(_bottomButtonsConstraints)
+		[contentView removeConstraints:_bottomButtonsConstraints];
+
+	NSMutableArray* bottomButtonsConstraints = [NSMutableArray array];
+	NSDictionary* views = self.allViews;
+
+	[bottomButtonsConstraints addObject:[NSLayoutConstraint constraintWithItem:_cancelButton attribute:NSLayoutAttributeBottom relatedBy:NSLayoutRelationEqual toItem:contentView attribute:NSLayoutAttributeBottom multiplier:1 constant:-12]];
+
+	if(_scrollView)
+	{
+		[bottomButtonsConstraints addObjectsFromArray:[NSLayoutConstraint constraintsWithVisualFormat:@"H:[cancel]-[commit]-(20)-|" options:NSLayoutFormatAlignAllBaseline metrics:nil views:views]];
+		[bottomButtonsConstraints addObjectsFromArray:[NSLayoutConstraint constraintsWithVisualFormat:@"V:[bottomDocumentViewDivider]-(12)-[showTableButton]-(12)-[topScrollViewDivider]" options:0 metrics:nil views:views]];
+		[bottomButtonsConstraints addObjectsFromArray:[NSLayoutConstraint constraintsWithVisualFormat:@"V:[bottomScrollViewDivider]-(12)-[action]" options:0 metrics:nil views:views]];
+		[bottomButtonsConstraints addObjectsFromArray:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|-(20)-[action]" options:0 metrics:nil views:views]];
+		[bottomButtonsConstraints addObject:[NSLayoutConstraint constraintWithItem:_commitButton attribute:NSLayoutAttributeTop relatedBy:NSLayoutRelationEqual toItem:_bottomScrollViewDivider attribute:NSLayoutAttributeBottom multiplier:1 constant:12]];
+	}
+	else
+	{
+		[bottomButtonsConstraints addObjectsFromArray:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|-(20)-[showTableButton]-(>=100)-[cancel]-[commit]-(20)-|" options:NSLayoutFormatAlignAllBaseline metrics:nil views:views]];
+		[bottomButtonsConstraints addObjectsFromArray:[NSLayoutConstraint constraintsWithVisualFormat:@"V:[bottomDocumentViewDivider]-(12)-[showTableButton]" options:0 metrics:nil views:views]];
+		[bottomButtonsConstraints addObject:[NSLayoutConstraint constraintWithItem:_commitButton attribute:NSLayoutAttributeTop relatedBy:NSLayoutRelationEqual toItem:_bottomDocumentViewDivider attribute:NSLayoutAttributeTop multiplier:1 constant:12]];
+	}
+
+	_bottomButtonsConstraints = bottomButtonsConstraints;
+	[contentView addConstraints:_bottomButtonsConstraints];
+}
+
+- (void)tearDownTableView
+{
+	[self.window makeFirstResponder:self.documentView.textView];
+
+	NSView* contentView = self.window.contentView;
+	[contentView removeConstraints:_scrollViewConstraints];
+	[contentView removeConstraint:_scrollViewHeightConstraint];
+	_scrollViewConstraints = nil;
+	_scrollViewHeightConstraint = nil;
+
+	for(NSView* view in @[ _topScrollViewDivider, _scrollView, _bottomScrollViewDivider, _actionPopUpButton ])
+		[view removeFromSuperview];
+
+	[_tableView unbind:NSContentBinding];
+	_tableView.delegate = nil;
+	_tableView.menu.delegate = nil;
+	_tableView.target = nil;
+	_tableView = nil;
+
+	_topScrollViewDivider = nil;
+	_scrollView = nil;
+	_bottomScrollViewDivider = nil;
+
+	_actionPopUpButton.menu.delegate = nil;
+	_actionPopUpButton = nil;
+
+	[self setupBottomButtonsConstraints];
+	[self.window displayIfNeeded];
+	[contentView removeConstraint:_documentViewHeightConstraint];
+	_documentViewHeightConstraint = [NSLayoutConstraint constraintWithItem:_documentView attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationGreaterThanOrEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:kOakCommitWindowMinimumDocumentViewHeight];
+	[contentView addConstraint:_documentViewHeightConstraint];
+}
+
+- (void)showTableViewAnimated:(BOOL)animated
+{
+	NSView* contentView = self.window.contentView;
+
+	NSTableColumn* tableColumn = [[NSTableColumn alloc] initWithIdentifier:@"path"];
+	tableColumn.editable = NO;
+
+	NSTableView* tableView = [[NSTableView alloc] initWithFrame:NSZeroRect];
+	[tableView addTableColumn:tableColumn];
+	tableView.headerView                         = nil;
+	tableView.focusRingType                      = NSFocusRingTypeNone;
+	tableView.usesAlternatingRowBackgroundColors = YES;
+	tableView.doubleAction                       = @selector(didDoubleClickTableView:);
+	tableView.target                             = self;
+	tableView.delegate                           = self;
+	tableView.menu                               = [NSMenu new];
+	tableView.menu.delegate                      = self;
+	_tableView                                   = tableView;
+	[_tableView bind:NSContentBinding toObject:_arrayController withKeyPath:@"arrangedObjects" options:0];
+
+	_scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+	_scrollView.hasVerticalScroller   = YES;
+	_scrollView.hasHorizontalScroller = NO;
+	_scrollView.autohidesScrollers    = YES;
+	_scrollView.borderType            = NSNoBorder;
+	_scrollView.documentView          = _tableView;
+
+	_topScrollViewDivider    = OakCreateHorizontalLine([NSColor grayColor]);
+	_bottomScrollViewDivider = OakCreateHorizontalLine([NSColor grayColor]);
+
+	_actionPopUpButton = OakCreateActionPopUpButton(YES);
+	_actionPopUpButton.bezelStyle = NSTexturedRoundedBezelStyle;
+	_actionPopUpButton.menu.delegate = self;
+
+	OakAddAutoLayoutViewsToSuperview(@[ _topScrollViewDivider, _scrollView, _bottomScrollViewDivider, _actionPopUpButton ], contentView);
+
+	NSMutableArray* scrollViewConstraints = [NSMutableArray array];
+	NSDictionary* views = self.allViews;
+
+	[scrollViewConstraints addObjectsFromArray:[NSLayoutConstraint constraintsWithVisualFormat:@"V:[showTableButton]-(12)-[topScrollViewDivider][scrollView][bottomScrollViewDivider]" options:0 metrics:nil views:views]];
+	[scrollViewConstraints addObjectsFromArray:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[scrollView(==topScrollViewDivider,==bottomScrollViewDivider)]|" options:0 metrics:nil views:views]];
+
+	_scrollViewConstraints = scrollViewConstraints;
+	_scrollViewHeightConstraint = [NSLayoutConstraint constraintWithItem:_scrollView attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:0];
+	[contentView addConstraints:_scrollViewConstraints];
+	[contentView addConstraint:_scrollViewHeightConstraint];
+
+	[self setupBottomButtonsConstraints];
+
+	[contentView removeConstraint:_documentViewHeightConstraint];
+	if(animated)
+	{
+		[NSAnimationContext runAnimationGroup:^(NSAnimationContext* context){
+			context.duration = 0.25;
+			_showTableButton.enabled = NO;
+			_documentViewHeightConstraint = [NSLayoutConstraint constraintWithItem:_documentView attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:NSHeight(_documentView.frame)];
+			[contentView addConstraint:_documentViewHeightConstraint];
+			_scrollViewHeightConstraint.animator.constant = kOakCommitWindowTableViewHeight;
+		} completionHandler:^{
+			[contentView removeConstraint:_documentViewHeightConstraint];
+			_documentViewHeightConstraint = [NSLayoutConstraint constraintWithItem:_documentView attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationGreaterThanOrEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:kOakCommitWindowMinimumDocumentViewHeight];
+			[contentView addConstraint:_documentViewHeightConstraint];
+			_showTableButton.enabled = YES;
+		}];
+	}
+	else
+	{
+		_documentViewHeightConstraint = [NSLayoutConstraint constraintWithItem:_documentView attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationGreaterThanOrEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:kOakCommitWindowMinimumDocumentViewHeight];
+		[contentView addConstraint:_documentViewHeightConstraint];
+		_scrollViewHeightConstraint.constant = kOakCommitWindowTableViewHeight;
+	}
+}
+
+- (void)hideTableViewAnimated:(BOOL)animated
+{
+	NSView* contentView = self.window.contentView;
+
+	[contentView removeConstraint:_documentViewHeightConstraint];
+	_documentViewHeightConstraint = [NSLayoutConstraint constraintWithItem:_documentView attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:NSHeight(_documentView.frame)];
+	[contentView addConstraint:_documentViewHeightConstraint];
+
+	if(animated)
+	{
+		[NSAnimationContext runAnimationGroup:^(NSAnimationContext* context){
+			context.duration = 0.25;
+			_showTableButton.enabled = NO;
+			_actionPopUpButton.hidden = YES;
+			_scrollViewHeightConstraint.animator.constant = 0;
+		} completionHandler:^{
+			[self tearDownTableView];
+			_showTableButton.enabled = YES;
+		}];
+	}
+	else
+	{
+		[self tearDownTableView];
+	}
+}
+
 - (void)parseArguments:(NSArray*)args
 {
-	NSArray* optionKeys = @[@"--ask", @"--log", @"--diff-cmd", @"--action-cmd", @"--status"];
+	NSArray* optionKeys = @[@"--log", @"--diff-cmd", @"--action-cmd", @"--status"];
 	args = [args subarrayWithRange:NSMakeRange(1, [args count]-1)];
 	self.options    = [NSMutableDictionary dictionary];
 	self.parameters = [NSMutableArray array];
@@ -237,8 +420,11 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 		[self.options setObject:actions forKey:@"--action-cmd"];
 }
 
-- (void)populateTableView
+- (void)setupArrayController
 {
+	_arrayController = [[NSArrayController alloc] init];
+	_arrayController.objectClass = [CWItem class];
+
 	auto selectedFiles = _environment.find("TM_SELECTED_FILES");
 	BOOL didSelectFiles = selectedFiles != _environment.end();
 
@@ -247,11 +433,58 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 	{
 		NSString* status = [statuses objectAtIndex:i];
 		CWItem* item = [CWItem itemWithPath:[self.parameters objectAtIndex:i] andSCMStatus:status commit:([status hasPrefix:@"X"] || ([status hasPrefix:@"?"] && !didSelectFiles)) ? NO : YES];
-		[self.arrayController addObject:item];
+		[_arrayController addObject:item];
 	}
 }
 
-- (void)showWindow:(id)sender
+- (void)observeValueForKeyPath:(NSString*)aKeyPath ofObject:(id)anObject change:(NSDictionary*)someChange context:(void*)context
+{
+	if(context == kOakCommitWindowIncludeItemBinding)
+	{
+		NSUInteger totalFilesToCommit = 0;
+		for(CWItem* item in [_arrayController arrangedObjects])
+		{
+			if(item.commit)
+				totalFilesToCommit += 1;
+		}
+		self.commitButton.title = totalFilesToCommit == 1 ? [NSString stringWithFormat:@"Commit %lu File", totalFilesToCommit] : [NSString stringWithFormat:@"Commit %lu Files", totalFilesToCommit];
+	}
+}
+
+- (IBAction)toggleTableView:(id)sender
+{
+	self.showsTableView = !self.showsTableView;
+
+	if(self.showsTableView)
+		[self showTableViewAnimated:YES];
+	else [self hideTableViewAnimated:YES];
+}
+
+- (void)setShowsTableView:(BOOL)flag
+{
+	if(_showsTableView == flag)
+		return;
+
+	_showsTableView = flag;
+
+	[[NSUserDefaults standardUserDefaults] setBool:_showsTableView forKey:kOakCommitWindowShowFileList];
+}
+
+- (void)sheetDidEnd:(id)sheetOrAlert returnCode:(NSInteger)returnCode contextInfo:(void*)unused
+{
+	if(self.documentView.document)
+	{
+		NSString* commitMessage = [NSString stringWithCxxString:self.documentView.document->content()];
+		if([[commitMessage stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length] > 0)
+			[self saveCommitMessage:commitMessage];
+	}
+
+	[self.documentView setDocument:document::document_ptr()];
+	[self sendCommitMessageToClient:NO];
+	[self.window orderOut:self];
+}
+
+- (void)beginSheetModalForWindow:(NSWindow*)aWindow completionHandler:(void(^)(NSInteger returnCode))aCompletionHandler
 {
 	std::string fileType = "text.plain";
 	auto scmName = _environment.find("TM_SCM_NAME");
@@ -263,33 +496,20 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 	}
 
 	document::document_ptr commitMessage = document::from_content("", fileType);
+	commitMessage->set_custom_name("Commit Message"); // release ‘untitled’ token
+	commitMessage->set_virtual_path(path::join(_environment["TM_PROJECT_DIRECTORY"], "commit-message.txt"));
 
 	if(NSString* logArgument = [self.options objectForKey:@"--log"])
 		commitMessage->set_content(to_s(logArgument));
 
 	[self.documentView setDocument:commitMessage];
 
-	std::string const title = format_string::expand("${TM_BUNDLE_ITEM_NAME:?${TM_BUNDLE_ITEM_NAME/…$//g}:Commit} — ${TM_PROJECT_DIRECTORY/^.*\\///} ($TM_SCM_NAME: $TM_SCM_BRANCH)", _environment);
-	[self.window setTitle:[NSString stringWithCxxString:title]];
-
 	[self.window recalculateKeyViewLoop];
 	[self.window makeFirstResponder:self.documentView];
-	[super showWindow:sender];
 
 	self.retainedSelf = self;
-}
 
-- (void)windowWillClose:(NSNotification*)aNotification
-{
-	if(self.documentView.document)
-	{
-		NSString* commitMessage = [NSString stringWithCxxString:self.documentView.document->content()];
-		if([[commitMessage stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length] > 0)
-			[self saveCommitMessage:commitMessage];
-	}
-
-	[self.documentView setDocument:document::document_ptr()];
-	[self sendCommitMessageToClient:NO];
+	[NSApp beginSheet:self.window modalForWindow:aWindow modalDelegate:self didEndSelector:@selector(sheetDidEnd:returnCode:contextInfo:) contextInfo:NULL];
 }
 
 - (void)sendCommitMessageToClient:(BOOL)success
@@ -310,7 +530,7 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 			for(CWItem* item in [_arrayController arrangedObjects])
 			{
 				if(item.commit)
-					[outputArray addObject:[NSString stringWithCxxString:path::escape([item.path UTF8String])]];
+					[outputArray addObject:[NSString stringWithCxxString:path::escape(to_s(item.path))]];
 			}
 			[outputArray addObject:@"\n"];
 			[proxy connectFromServerWithOptions:@{
@@ -392,7 +612,7 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 - (void)restorePreviousCommitMessage:(id)sender
 {
 	NSString* message = [sender representedObject];
-	document::document_ptr commitMessage = document::from_content([message UTF8String], self.documentView.document->file_type());
+	document::document_ptr commitMessage = document::from_content(to_s(message), self.documentView.document->file_type());
 	[self.documentView setDocument:commitMessage];
 }
 
@@ -436,7 +656,7 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 
 		std::transform(diffCmd.begin(), diffCmd.end(), diffCmd.begin(), &path::escape);
 
-		std::string const cmdString = text::format("cd \"${TM_PROJECT_DIRECTORY}\" && %s|\"$TM_MATE\" --async  --name \"---/+++ %s\"", text::join(diffCmd, " ").c_str(), path::display_name(to_s(filePath)).c_str());
+		std::string const cmdString = text::format("cd \"${TM_PROJECT_DIRECTORY}\" && %s|\"$TM_MATE\" --no-wait --name \"---/+++ %s\"", text::join(diffCmd, " ").c_str(), path::display_name(to_s(filePath)).c_str());
 		dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
 			bool success = io::exec(_environment, "/bin/sh", "-c", cmdString.c_str(), NULL) != NULL_STR;
 			if(!success)
@@ -453,13 +673,13 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 - (void)performCommit:(id)sender
 {
 	[self sendCommitMessageToClient:YES];
-	[self close];
+	[NSApp endSheet:self.window returnCode:NSRunStoppedResponse];
 }
 
 - (void)cancel:(id)sender
 {
 	[self sendCommitMessageToClient:NO];
-	[self close];
+	[NSApp endSheet:self.window returnCode:NSRunAbortedResponse];
 }
 
 - (void)checkAll:(id)sender
@@ -585,16 +805,12 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 - (NSView*)tableView:(NSTableView*)aTableView viewForTableColumn:(NSTableColumn*)aTableColumn row:(NSInteger)row
 {
 	CWTableCellView* cellView = [aTableView makeViewWithIdentifier:aTableColumn.identifier owner:self];
+
 	if(!cellView)
 	{
-		NSViewController* viewController = [[NSViewController alloc] initWithNibName:@"CWTableCellView" bundle:[NSBundle bundleForClass:[self class]]];
-		cellView = (CWTableCellView*)viewController.view;
+		cellView = [CWTableCellView new];
 		cellView.identifier = aTableColumn.identifier;
 	}
-
-	[cellView.textField bind:NSValueBinding toObject:cellView withKeyPath:@"objectValue.path" options:0];
-	[cellView.commitCheckBox bind:NSValueBinding toObject:cellView withKeyPath:@"objectValue.commit" options:0];
-	[cellView.statusTextField bind:NSValueBinding toObject:cellView withKeyPath:@"objectValue.scmStatus" options:@{ NSValueTransformerNameBindingOption : @"CWStatusStringTransformer" }];
 
 	[cellView.diffButton setAction:@selector(didDoubleClickTableView:)];
 	[cellView.diffButton setTarget:self];
@@ -603,6 +819,10 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 
 	return cellView;
 }
+@end
+
+@protocol OakProjectIdentifier
+- (NSString*)identifier;
 @end
 
 @interface OakCommitWindowServer ()
@@ -630,7 +850,23 @@ static NSUInteger const kOakCommitWindowCommitMessagesMax = 5;
 
 - (void)connectFromClientWithOptions:(NSDictionary*)someOptions
 {
+	NSWindow* projectWindow = [NSApp mainWindow];
+	if(NSString* identifier = [someOptions valueForKeyPath:@"environment.TM_PROJECT_UUID"])
+	{
+		for(NSWindow* window in [NSApp orderedWindows])
+		{
+			if([window.delegate respondsToSelector:@selector(identifier)])
+			{
+				if([identifier isEqualToString:[id <OakProjectIdentifier>(window.delegate) identifier]])
+				{
+					projectWindow = window;
+					break;
+				}
+			}
+		}
+	}
+
 	OakCommitWindow* commitWindow = [[OakCommitWindow alloc] initWithOptions:someOptions];
-	[commitWindow showWindow:self];
+	[commitWindow beginSheetModalForWindow:projectWindow completionHandler:^(NSInteger returnCode){ }];
 }
 @end

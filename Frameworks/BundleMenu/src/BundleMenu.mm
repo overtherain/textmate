@@ -109,9 +109,8 @@ void OakAddBundlesToMenu (std::vector<bundles::item_ptr> const& items, bool setK
 				}
 				else
 				{
-					if(pendingSeparator)
+					if(!showBundleHeadings && std::exchange(pendingSeparator, false))
 						[menu addItem:[NSMenuItem separatorItem]];
-					pendingSeparator = false;
 
 					NSMenuItem* menuItem = [menu addItemWithTitle:[NSString stringWithCxxString:item->name()] action:menuAction keyEquivalent:@""];
 					[menuItem setRepresentedObject:[NSString stringWithCxxString:item->uuid()]];
@@ -140,7 +139,7 @@ bundles::item_ptr OakShowMenuForBundleItems (std::vector<bundles::item_ptr> cons
 		return items.front();
 
 	NSMenu* menu = [NSMenu new];
-	[menu setFont:[NSFont menuFontOfSize:[NSFont smallSystemFontSize]]];
+	menu.font = [NSFont menuFontOfSize:([[NSUserDefaults standardUserDefaults] integerForKey:@"OakBundleManagerDisambiguateMenuFontSize"] ?: 11)];
 	OakAddBundlesToMenu(items, false, menu, @selector(performBundleItemWithUUIDStringFrom:));
 	[menu update];
 

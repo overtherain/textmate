@@ -12,7 +12,6 @@
 #import <io/io.h>
 #import <oak/oak.h>
 #import <io/entries.h>
-#import <OakFoundation/NSArray Additions.h>
 #import <OakFoundation/NSString Additions.h>
 #import <OakAppKit/OakAppKit.h>
 #import <OakAppKit/OakFileIconImage.h>
@@ -21,7 +20,6 @@
 #import <OakAppKit/OakOpenWithMenu.h>
 #import <OakAppKit/OakUIConstructionFunctions.h>
 #import <OakAppKit/OakZoomingIcon.h>
-#import <OakAppKit/NSView Additions.h>
 #import <OakSystem/application.h>
 #import <bundles/bundles.h>
 #import <document/document.h>
@@ -107,11 +105,11 @@ static NSImage* IconImage (NSURL* url, NSSize size = NSMakeSize(16, 16))
 @interface OakFileBrowser () <OFBOutlineViewMenuDelegate, NSMenuDelegate>
 {
 	OBJC_WATCH_LEAKS(OakFileBrowser);
+	OFBHeaderView* _headerView;
 	NSUInteger _historyIndex;
 	NSUndoManager* _localUndoManager;
 }
 @property (nonatomic, readwrite)         OakFileBrowserView* view;
-@property (nonatomic)                    OFBHeaderView* headerView;
 @property (nonatomic)                    OFBOutlineView* outlineView;
 @property (nonatomic)                    OFBActionsView* actionsView;
 
@@ -252,20 +250,15 @@ static NSMutableSet* SymmetricDifference (NSMutableSet* aSet, NSMutableSet* anot
 
 	NSDictionary* views = @{
 		@"header"         : _headerView,
-		@"headerDivider"  : OakCreateHorizontalLine([NSColor colorWithCalibratedWhite:0.500 alpha:1], [NSColor colorWithCalibratedWhite:0.750 alpha:1]),
 		@"browser"        : scrollView,
 		@"actionsDivider" : OakCreateHorizontalLine([NSColor colorWithCalibratedWhite:0.500 alpha:1], [NSColor colorWithCalibratedWhite:0.750 alpha:1]),
 		@"actions"        : _actionsView,
 	};
 
-	for(NSView* view in [views allValues])
-	{
-		[view setTranslatesAutoresizingMaskIntoConstraints:NO];
-		[_view addSubview:view];
-	}
+	OakAddAutoLayoutViewsToSuperview([views allValues], _view);
 
-	[_view addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[browser(==header,==headerDivider,==actionsDivider,==actions)]|" options:0 metrics:nil views:views]];
-	[_view addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[header][headerDivider][browser][actionsDivider][actions]|"      options:NSLayoutFormatAlignAllLeft metrics:nil views:views]];
+	[_view addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[browser(==header,==actionsDivider,==actions)]|" options:0 metrics:nil views:views]];
+	[_view addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[header][browser][actionsDivider][actions]|"     options:NSLayoutFormatAlignAllLeft metrics:nil views:views]];
 }
 
 - (void)setupViewWithState:(NSDictionary*)fileBrowserState
@@ -284,8 +277,7 @@ static NSMutableSet* SymmetricDifference (NSMutableSet* aSet, NSMutableSet* anot
 	r.origin.x += 7; // FIXME some hard-coded values here
 	r.origin.y -= 1;
 	r.size = NSMakeSize(16, 16);
-	r = [_outlineView convertRect:r toView:nil];
-	r.origin = [_outlineView.window convertBaseToScreen:r.origin];
+	r = [_outlineView.window convertRectToScreen:[_outlineView convertRect:r toView:nil]];
 	return r;
 }
 
@@ -800,7 +792,7 @@ static NSMutableSet* SymmetricDifference (NSMutableSet* aSet, NSMutableSet* anot
 		NSArray* paths = [pboard propertyListForType:NSFilenamesPboardType];
 		[pboard declareTypes:@[ NSFilenamesPboardType, @"OakFileBrowserOperation" ] owner:nil];
 		[pboard setPropertyList:paths forType:NSFilenamesPboardType];
-		[pboard setString:@"cut" forType:@"OakFileBrowserOperation"];;
+		[pboard setString:@"cut" forType:@"OakFileBrowserOperation"];
 	}
 }
 
@@ -838,12 +830,12 @@ static NSMutableSet* SymmetricDifference (NSMutableSet* aSet, NSMutableSet* anot
 
 - (void)executeBundleCommand:(id)sender
 {
-	if(bundles::item_ptr item = bundles::lookup(to_s((NSString*)[sender representedObject])))
+	if(bundles::item_ptr item = bundles::lookup(to_s([sender representedObject])))
 	{
 		std::map<std::string, std::string> map = oak::basic_environment();
 		map << [self variables] << item->bundle_variables();
 		map = bundles::scope_variables(map);
-		map = variables_for_path(map, to_s((NSString*)[self.selectedPaths firstObject]));
+		map = variables_for_path(map, to_s([self.selectedPaths firstObject]));
 		document::run(parse_command(item), ng::buffer_t(), ng::ranges_t(), [self.selectedPaths count] == 1 ? document::create(map["TM_SELECTED_FILE"]) : document::document_ptr(), map);
 	}
 }
@@ -900,8 +892,8 @@ static NSMutableSet* SymmetricDifference (NSMutableSet* aSet, NSMutableSet* anot
 	if(rootPath)
 	{
 		[aMenu addItem:[NSMenuItem separatorItem]];
-		[[aMenu addItemWithTitle:@"New File"   action:@selector(newDocumentInDirectory:) keyEquivalent:@"n"] setKeyEquivalentModifierMask:NSCommandKeyMask|NSShiftKeyMask];
-		[[aMenu addItemWithTitle:@"New Folder" action:@selector(newFolder:)              keyEquivalent:@"n"] setKeyEquivalentModifierMask:NSCommandKeyMask|NSControlKeyMask];
+		[[aMenu addItemWithTitle:@"New File"   action:@selector(newDocumentInDirectory:) keyEquivalent:@"n"] setKeyEquivalentModifierMask:NSCommandKeyMask|NSControlKeyMask];
+		[[aMenu addItemWithTitle:@"New Folder" action:@selector(newFolder:)              keyEquivalent:@"n"] setKeyEquivalentModifierMask:NSCommandKeyMask|NSShiftKeyMask];
 	}
 
 	if(rootPath || hasFileSelected)
@@ -1252,8 +1244,9 @@ static NSMutableSet* SymmetricDifference (NSMutableSet* aSet, NSMutableSet* anot
 	static std::set<SEL> const requireSelection{ @selector(didDoubleClickOutlineView:), @selector(editSelectedEntries:), @selector(duplicateSelectedEntries:), @selector(cut:), @selector(copy:), @selector(delete:) };
 
 	NSUInteger selectedFiles = 0;
+	struct stat buf;
 	for(FSItem* item in self.selectedItems)
-		selectedFiles += [item.url isFileURL] && path::exists([[item.url path] fileSystemRepresentation]) ? 1 : 0;
+		selectedFiles += [item.url isFileURL] && lstat([[item.url path] fileSystemRepresentation], &buf) == 0 ? 1 : 0;
 
 	if([item action] == @selector(goToParentFolder:))
 		res = ParentForURL(_url) != nil;

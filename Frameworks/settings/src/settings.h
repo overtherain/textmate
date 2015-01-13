@@ -36,11 +36,17 @@ struct PUBLIC settings_t
 	static std::string raw_get (std::string const& key, std::string const& section = "");
 
 	static void set (std::string const& key, std::string const& value, std::string const& fileType = "", std::string const& path = NULL_STR);
-	static void set (std::string const& key, double decimal,  std::string const& fileType = "", std::string const& path = NULL_STR) { settings_t::set(key, std::to_string(decimal),              fileType, path); }
 	static void set (std::string const& key, size_t number,   std::string const& fileType = "", std::string const& path = NULL_STR) { settings_t::set(key, std::to_string(number),               fileType, path); }
 	static void set (std::string const& key, int32_t number,  std::string const& fileType = "", std::string const& path = NULL_STR) { settings_t::set(key, std::to_string(number),               fileType, path); }
 	static void set (std::string const& key, bool flag,       std::string const& fileType = "", std::string const& path = NULL_STR) { settings_t::set(key, std::string(flag ? "true" : "false"), fileType, path); }
 	static void set (std::string const& key, char const* str, std::string const& fileType = "", std::string const& path = NULL_STR) { settings_t::set(key, std::string(str),                     fileType, path); }
+
+	static void set (std::string const& key, double decimal,  std::string const& fileType = "", std::string const& path = NULL_STR)
+	{
+		if(decimal == roundl(decimal))
+				settings_t::set(key, (int32_t)roundl(decimal), fileType, path);
+		else	settings_t::set(key, std::to_string(decimal), fileType, path);
+	}
 
 	static void set_default_settings_path (std::string const& path);
 	static void set_global_settings_path (std::string const& path);
@@ -63,5 +69,18 @@ private:
 
 PUBLIC settings_t settings_for_path (std::string const& path = NULL_STR, scope::scope_t const& scope = "", std::string const& directory = NULL_STR, std::map<std::string, std::string> variables = std::map<std::string, std::string>());
 PUBLIC std::map<std::string, std::string> variables_for_path (std::map<std::string, std::string> const& base = std::map<std::string, std::string>(), std::string const& path = NULL_STR, scope::scope_t const& scope = "", std::string const& directory = NULL_STR);
+
+struct setting_info_t
+{
+	setting_info_t (std::string const& variable, std::string const& value, std::string const& path, size_t lineNumber, std::string const& section) : variable(variable), value(value), path(path), line_number(lineNumber), section(section) { }
+
+	std::string variable;
+	std::string value;
+	std::string path;
+	size_t line_number;
+	std::string section;
+};
+
+PUBLIC std::vector<setting_info_t> settings_info_for_path (std::string const& path = NULL_STR, scope::scope_t const& scope = "", std::string const& directory = NULL_STR);
 
 #endif /* end of include guard: SETTINGS_H_F99MMG5F */

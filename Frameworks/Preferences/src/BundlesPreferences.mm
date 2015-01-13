@@ -1,10 +1,12 @@
 #import "BundlesPreferences.h"
 #import <BundlesManager/BundlesManager.h>
+#import <OakFoundation/OakFoundation.h>
 #import <OakFoundation/NSDate Additions.h>
 #import <OakFoundation/NSString Additions.h>
 #import <MGScopeBar/MGScopeBar.h>
 #import <ns/ns.h>
 #import <regexp/format_string.h>
+#import <text/case.h>
 #import <text/ctype.h>
 #import <text/decode.h>
 
@@ -26,6 +28,23 @@ static std::string textify (std::string str)
 - (NSString*)toolbarItemLabel      { return @"Bundles"; }
 - (NSView*)initialKeyView          { return bundlesTableView; }
 
+- (void)sortBundlesByColumnWithIdentifier:(NSString*)anIdentifier ascending:(BOOL)ascendingFlag
+{
+	text::less_t lessThan;
+
+	if([anIdentifier isEqualToString:@"installed"])
+		std::stable_sort(bundles.begin(), bundles.end(), [](bundles_db::bundle_ptr lhs, bundles_db::bundle_ptr rhs){ return lhs.get()->installed() && !rhs.get()->installed(); });
+	else if([anIdentifier isEqualToString:@"name"])
+		std::sort(bundles.begin(), bundles.end(), [&lessThan](bundles_db::bundle_ptr lhs, bundles_db::bundle_ptr rhs){ return lessThan(lhs.get()->name(), rhs.get()->name()); });
+	else if([anIdentifier isEqualToString:@"date"])
+		std::sort(bundles.begin(), bundles.end(), [](bundles_db::bundle_ptr lhs, bundles_db::bundle_ptr rhs){ return (rhs.get()->installed() ? rhs.get()->path_updated() : rhs.get()->url_updated()) < (lhs.get()->installed() ? lhs.get()->path_updated() : lhs.get()->url_updated()); });
+	else if([anIdentifier isEqualToString:@"description"])
+		std::sort(bundles.begin(), bundles.end(), [&lessThan](bundles_db::bundle_ptr lhs, bundles_db::bundle_ptr rhs){ return lessThan(textify(lhs.get()->description()), textify(rhs.get()->description())); });
+
+	if(!ascendingFlag)
+		std::reverse(bundles.begin(), bundles.end());
+}
+
 - (void)bundlesDidChange:(id)sender
 {
 	std::set<std::string, text::less_t> set;
@@ -34,7 +53,7 @@ static std::string textify (std::string str)
 		bundles_db::bundle_ptr bundle = [_bundlesManager bundleAtIndex:i];
 		if(bundle->category() != NULL_STR)
 				set.insert(bundle->category());
-		else	NSLog(@"%s No category for bundle: %s", sel_getName(_cmd), bundle->name().c_str());;
+		else	NSLog(@"%s No category for bundle: %s", sel_getName(_cmd), bundle->name().c_str());
 	}
 
 	if(categories != std::vector<std::string>(set.begin(), set.end()))
@@ -48,11 +67,21 @@ static std::string textify (std::string str)
 	{
 		bundles_db::bundle_ptr bundle = [_bundlesManager bundleAtIndex:i];
 		if(enabledCategories.empty() || enabledCategories.find(bundle->category()) != enabledCategories.end())
-			bundles.push_back(bundle);
+		{
+			if(OakIsEmptyString(filterString))
+			{
+				bundles.push_back(bundle);
+			}
+			else
+			{
+				std::string filter = text::lowercase(to_s(filterString));
+				if(text::lowercase(bundle->name()).find(filter) != std::string::npos)
+					bundles.push_back(bundle);
+			}
+		}
 	}
-	for(NSTableColumn* tableColumn in [bundlesTableView tableColumns])
-		[bundlesTableView setIndicatorImage:nil inTableColumn:tableColumn];
-	[bundlesTableView setIndicatorImage:[NSImage imageNamed:@"NSAscendingSortIndicator"] inTableColumn:[bundlesTableView tableColumnWithIdentifier:@"name"]];
+
+	[self sortBundlesByColumnWithIdentifier:sortColumnIdentifier ascending:sortAscending];
 	[bundlesTableView reloadData];
 }
 
@@ -60,6 +89,11 @@ static std::string textify (std::string str)
 {
 	if(self = [super initWithNibName:@"BundlesPreferences" bundle:[NSBundle bundleForClass:[self class]]])
 	{
+		[MGScopeBar class]; // Ensure that we reference the class so that the linker doesn’t strip the framework
+
+		sortColumnIdentifier = @"name";
+		sortAscending        = YES;
+
 		self.bundlesManager = [BundlesManager sharedInstance];
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(bundlesDidChange:) name:BundlesManagerBundlesDidChangeNotification object:_bundlesManager];
 		[self bundlesDidChange:self];
@@ -120,32 +154,38 @@ static std::string textify (std::string str)
 	[self bundlesDidChange:self];
 }
 
+- (NSView*)accessoryViewForScopeBar:(MGScopeBar*)theScopeBar
+{
+	return searchField;
+}
+
+- (IBAction)filterStringDidChange:(id)sender
+{
+	filterString = searchField.stringValue;
+	[self bundlesDidChange:self];
+}
+
 // ========================
 // = NSTableView Delegate =
 // ========================
 
 - (void)tableView:(NSTableView*)aTableView didClickTableColumn:(NSTableColumn*)aTableColumn
 {
-	text::less_t lessThan;
+	NSArray* const sortableColumns = @[ @"installed", @"name", @"date", @"description" ];
 
-	if([[aTableColumn identifier] isEqualToString:@"installed"])
-		std::stable_sort(bundles.begin(), bundles.end(), [](bundles_db::bundle_ptr lhs, bundles_db::bundle_ptr rhs){ return lhs.get()->installed() && !rhs.get()->installed(); });
-	else if([[aTableColumn identifier] isEqualToString:@"name"])
-		std::sort(bundles.begin(), bundles.end(), [&lessThan](bundles_db::bundle_ptr lhs, bundles_db::bundle_ptr rhs){ return lessThan(lhs.get()->name(), rhs.get()->name()); });
-	else if([[aTableColumn identifier] isEqualToString:@"date"])
-		std::sort(bundles.begin(), bundles.end(), [](bundles_db::bundle_ptr lhs, bundles_db::bundle_ptr rhs){ return (rhs.get()->installed() ? rhs.get()->path_updated() : rhs.get()->url_updated()) < (lhs.get()->installed() ? lhs.get()->path_updated() : lhs.get()->url_updated()); });
-	else if([[aTableColumn identifier] isEqualToString:@"description"])
-		std::sort(bundles.begin(), bundles.end(), [&lessThan](bundles_db::bundle_ptr lhs, bundles_db::bundle_ptr rhs){ return lessThan(textify(lhs.get()->description()), textify(rhs.get()->description())); });
-	else
+	NSString* columnIdentifier = [aTableColumn identifier];
+	if(![sortableColumns containsObject:columnIdentifier])
 		return;
 
-	BOOL sortDescending = [aTableView indicatorImageInTableColumn:aTableColumn] == [NSImage imageNamed:@"NSAscendingSortIndicator"];
-	if(sortDescending)
-		std::reverse(bundles.begin(), bundles.end());
+	BOOL ascending = [columnIdentifier isEqualToString:sortColumnIdentifier] ? !sortAscending : YES;
+	[self sortBundlesByColumnWithIdentifier:columnIdentifier ascending:ascending];
 
-	for(NSTableColumn* tableColumn in [aTableView tableColumns])
+	sortColumnIdentifier = columnIdentifier;
+	sortAscending        = ascending;
+
+	for(NSTableColumn* tableColumn in [bundlesTableView tableColumns])
 		[aTableView setIndicatorImage:nil inTableColumn:tableColumn];
-	[aTableView setIndicatorImage:[NSImage imageNamed:(sortDescending ? @"NSDescendingSortIndicator" : @"NSAscendingSortIndicator")] inTableColumn:aTableColumn];
+	[aTableView setIndicatorImage:[NSImage imageNamed:(ascending ? @"NSAscendingSortIndicator" : @"NSDescendingSortIndicator")] inTableColumn:aTableColumn];
 
 	[aTableView reloadData];
 }

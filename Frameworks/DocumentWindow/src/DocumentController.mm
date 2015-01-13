@@ -12,8 +12,6 @@
 #import <OakAppKit/OakPasteboard.h>
 #import <OakAppKit/OakSavePanel.h>
 #import <OakAppKit/OakTabBarView.h>
-#import <OakAppKit/OakWindowFrameHelper.h>
-#import <OakFoundation/NSArray Additions.h>
 #import <OakFoundation/NSString Additions.h>
 #import <Preferences/Keys.h>
 #import <OakTextView/OakDocumentView.h>
@@ -34,7 +32,7 @@
 #import <oak/compat.h>
 #import <kvdb/kvdb.h>
 
-static NSString* const kUserDefaultsFindInSelectionByDefault = @"findInSelectionByDefault";
+static NSString* const kUserDefaultsAlwaysFindInDocument = @"alwaysFindInDocument";
 static NSString* const kUserDefaultsDisableFolderStateRestore = @"disableFolderStateRestore";
 static NSString* const kUserDefaultsHideStatusBarKey = @"hideStatusBar";
 static NSString* const OakDocumentPboardType = @"OakDocumentPboardType"; // drag’n’drop of tabs
@@ -58,7 +56,7 @@ static BOOL IsInShouldTerminateEventLoop = NO;
 }
 @end
 
-@interface DocumentController () <NSWindowDelegate, OakTabBarViewDelegate, OakTabBarViewDataSource, OakTextViewDelegate, OakFileBrowserDelegate, OakWindowFrameHelperDelegate, QLPreviewPanelDelegate, QLPreviewPanelDataSource>
+@interface DocumentController () <NSWindowDelegate, OakTabBarViewDelegate, OakTabBarViewDataSource, OakTextViewDelegate, OakFileBrowserDelegate, QLPreviewPanelDelegate, QLPreviewPanelDataSource>
 @property (nonatomic) ProjectLayoutView*          layoutView;
 @property (nonatomic) OakTabBarView*              tabBarView;
 @property (nonatomic) OakDocumentView*            documentView;
@@ -172,6 +170,8 @@ namespace
 					case did_change_path:
 						[_self setDocumentPath:[NSString stringWithCxxString:document->path()]];
 						[_self setDocumentDisplayName:[NSString stringWithCxxString:document->display_name()]];
+						if(!_self.projectPath)
+							_self.projectPath = [NSString stringWithCxxString:path::parent(document->path())];
 					break;
 
 					case did_change_on_disk_status:  [_self setDocumentIsOnDisk:document->is_on_disk()];                      break;
@@ -286,7 +286,8 @@ namespace
 		self.layoutView.tabBarView   = self.tabBarView;
 		self.layoutView.documentView = self.documentView;
 
-		self.window = [[NSWindow alloc] initWithContentRect:NSZeroRect styleMask:(NSTitledWindowMask|NSClosableWindowMask|NSResizableWindowMask|NSMiniaturizableWindowMask|NSTexturedBackgroundWindowMask) backing:NSBackingStoreBuffered defer:NO];
+		NSUInteger windowStyle = (NSTitledWindowMask|NSClosableWindowMask|NSResizableWindowMask|NSMiniaturizableWindowMask|NSTexturedBackgroundWindowMask);
+		self.window = [[NSWindow alloc] initWithContentRect:[NSWindow contentRectForFrameRect:[self frameRectForNewWindow] styleMask:windowStyle] styleMask:windowStyle backing:NSBackingStoreBuffered defer:NO];
 		self.window.autorecalculatesKeyViewLoop = YES;
 		self.window.collectionBehavior          = NSWindowCollectionBehaviorFullScreenPrimary;
 		self.window.delegate                    = self;
@@ -296,12 +297,10 @@ namespace
 		[self.window setAutorecalculatesContentBorderThickness:NO forEdge:NSMaxYEdge];
 		[self.window setAutorecalculatesContentBorderThickness:NO forEdge:NSMinYEdge];
 
-		[self.layoutView setTranslatesAutoresizingMaskIntoConstraints:NO];
-		[self.window.contentView addSubview:self.layoutView];
+		OakAddAutoLayoutViewsToSuperview(@[ self.layoutView ], self.window.contentView);
+
 		[self.window.contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[view]|" options:0 metrics:nil views:@{ @"view" : self.layoutView }]];
 		[self.window.contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[view]|" options:0 metrics:nil views:@{ @"view" : self.layoutView }]];
-
-		[OakWindowFrameHelper windowFrameHelperWithWindow:self.window];
 
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(userDefaultsDidChange:) name:NSUserDefaultsDidChangeNotification object:[NSUserDefaults standardUserDefaults]];
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(applicationDidBecomeActiveNotification:) name:NSApplicationDidBecomeActiveNotification object:NSApp];
@@ -317,16 +316,87 @@ namespace
 {
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 
+	self.window.delegate        = nil;
 	self.tabBarView.dataSource  = nil;
 	self.tabBarView.delegate    = nil;
 	self.textView.delegate      = nil;
+
+	// When option-clicking to close all windows then
+	// messages are sent to our window after windowWillClose:
+	__autoreleasing __attribute__ ((unused)) NSWindow* delayRelease = self.window;
 }
+
+// ======================================
+// = Find suitable frame for new window =
+// ======================================
+
+- (NSRect)windowFrame
+{
+	NSRect res = [self.window frame];
+	if(self.fileBrowserVisible && !self.disableFileBrowserWindowResize)
+		res.size.width -= self.fileBrowserWidth;
+	return res;
+}
+
+- (NSRect)cascadedWindowFrame
+{
+	NSRect r = [self windowFrame];
+	return { { NSMinX(r) + 21, NSMinY(r) - 23 }, r.size };
+}
+
+- (NSRect)frameRectForNewWindow
+{
+	std::map<CGFloat, NSWindow*> ourWindows;
+	for(NSWindow* win in [NSApp windows])
+	{
+		if([win isVisible] && [win isOnActiveSpace] && ![win isZoomed] && (([win styleMask] & NSFullScreenWindowMask)) != NSFullScreenWindowMask && [[win delegate] isKindOfClass:[self class]])
+			ourWindows.emplace(NSMaxY([win frame]), win);
+	}
+
+	if(!ourWindows.empty())
+	{
+		NSRect r = [(DocumentController*)ourWindows.begin()->second.delegate cascadedWindowFrame];
+
+		NSRect scrRect = [[NSScreen mainScreen] visibleFrame];
+		if(NSContainsRect(scrRect, r))
+			return r;
+
+		r.origin.x = 61;
+		r.origin.y = NSMaxY(scrRect) - NSHeight(r);
+
+		BOOL alreadyHasWrappedWindow = NO;
+		for(auto pair : ourWindows)
+		{
+			if(NSEqualPoints([pair.second frame].origin, r.origin))
+				alreadyHasWrappedWindow = YES;
+		}
+
+		if(alreadyHasWrappedWindow)
+		{
+			NSWindow* mainWindow = [NSApp mainWindow];
+			if([[mainWindow delegate] isKindOfClass:[self class]])
+				r = [(DocumentController*)mainWindow.delegate cascadedWindowFrame];
+		}
+
+		return r;
+	}
+
+	if(NSString* rectStr = [[NSUserDefaults standardUserDefaults] stringForKey:@"DocumentControllerWindowFrame"])
+		return NSRectFromString(rectStr);
+
+	NSRect r = [[NSScreen mainScreen] visibleFrame];
+	return r = NSIntegralRect(NSInsetRect(r, NSWidth(r) / 3, NSHeight(r) / 5));
+}
+
+// =========================
 
 - (void)windowWillClose:(NSNotification*)aNotification
 {
+	if((([self.window styleMask] & NSFullScreenWindowMask) != NSFullScreenWindowMask) && !self.window.isZoomed)
+		[[NSUserDefaults standardUserDefaults] setObject:NSStringFromRect([self windowFrame]) forKey:@"DocumentControllerWindowFrame"];
+
 	self.documents          = std::vector<document::document_ptr>();
 	self.selectedDocument   = document::document_ptr();
-	self.window.delegate    = nil;
 	self.fileBrowserVisible = NO; // Make window frame small as we no longer respond to savableWindowFrame
 	self.identifier         = nil; // This removes us from AllControllers and causes a release
 }
@@ -589,8 +659,8 @@ namespace
 	if(createIfEmptyFlag && newDocuments.empty())
 		newDocuments.push_back(create_untitled_document_in_folder(to_s(self.untitledSavePath)));
 
-	self.selectedTabIndex = newSelectedTabIndex;
 	self.documents        = newDocuments;
+	self.selectedTabIndex = newSelectedTabIndex;
 
 	if(!newDocuments.empty() && newDocuments[newSelectedTabIndex]->identifier() != selectedUUID)
 		[self openAndSelectDocument:newDocuments[newSelectedTabIndex]];
@@ -731,10 +801,16 @@ namespace
 
 + (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender
 {
+	DocumentController* controller;
+
 	BOOL restoresSession = ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableSessionRestoreKey];
 	std::vector<document::document_ptr> documents;
 	for(DocumentController* delegate in SortedControllers())
+	{
 		std::copy_if(delegate.documents.begin(), delegate.documents.end(), back_inserter(documents), [&restoresSession](document::document_ptr const& doc){ return doc->is_modified() && (doc->path() != NULL_STR || !restoresSession); });
+		if(!documents.empty() && !controller)
+			controller = delegate;
+	}
 
 	if(documents.empty())
 	{
@@ -744,7 +820,6 @@ namespace
 
 	IsInShouldTerminateEventLoop = YES;
 
-	DocumentController* controller = [SortedControllers() firstObject];
 	[controller showCloseWarningUIForDocuments:documents completionHandler:^(BOOL canClose){
 		if(canClose)
 			[self saveSessionAndDetachBackups];
@@ -861,7 +936,7 @@ namespace
 
 - (BOOL)disableTabReordering
 {
-	return [[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableTabReorderingKey];;
+	return [[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableTabReorderingKey];
 }
 
 - (void)openItems:(NSArray*)items closingOtherTabs:(BOOL)closeOtherTabsFlag
@@ -869,9 +944,9 @@ namespace
 	std::vector<document::document_ptr> documents;
 	for(id item in items)
 	{
-		std::string const path  = to_s((NSString*)[item objectForKey:@"path"]);
-		std::string const uuid  = to_s((NSString*)[item objectForKey:@"identifier"]);
-		std::string const range = to_s((NSString*)[item objectForKey:@"selectionString"]);
+		std::string const path  = to_s([item objectForKey:@"path"]);
+		std::string const uuid  = to_s([item objectForKey:@"identifier"]);
+		std::string const range = to_s([item objectForKey:@"selectionString"]);
 
 		document::document_ptr doc;
 		if(path == NULL_STR && oak::uuid_t::is_valid(uuid))
@@ -926,7 +1001,7 @@ namespace
 		}
 		[self closeTabsAtIndexes:indexSet askToSaveChanges:YES createDocumentIfEmpty:NO];
 	}
-	else
+	else if(![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableTabAutoCloseKey])
 	{
 		NSInteger excessTabs = _documents.size() - std::max<NSUInteger>(self.tabBarView.countOfVisibleTabs, 8);
 		if(self.tabBarView && excessTabs > 0)
@@ -973,7 +1048,18 @@ namespace
 			if(filterUUID)
 				show_command_error(error, filterUUID);
 
-			[self openAndSelectDocument:document::from_content("TODO Reselect previously open document")];
+			// Close the tab that failed to open
+			for(size_t i = 0; i < _documents.size(); ++i)
+			{
+				if(_documents[i]->identifier() == doc->identifier())
+				{
+					[self closeTabsAtIndexes:[NSIndexSet indexSetWithIndex:i] askToSaveChanges:NO createDocumentIfEmpty:self.fileBrowserVisible];
+					break;
+				}
+			}
+
+			if(_documents.empty())
+				[self close];
 		}
 	}];
 }
@@ -991,8 +1077,7 @@ namespace
 	{
 		NSString* const suggestedFolder  = self.untitledSavePath;
 		NSString* const suggestedName    = DefaultSaveNameForDocument(_selectedDocument);
-		encoding::type suggestedEncoding = _selectedDocument->encoding_for_save_as_path(to_s([suggestedFolder stringByAppendingPathComponent:suggestedName]));
-		[OakSavePanel showWithPath:suggestedName directory:suggestedFolder fowWindow:self.window encoding:suggestedEncoding completionHandler:^(NSString* path, encoding::type const& encoding){
+		[OakSavePanel showWithPath:suggestedName directory:suggestedFolder fowWindow:self.window encoding:_selectedDocument->disk_encoding() completionHandler:^(NSString* path, encoding::type const& encoding){
 			if(!path)
 				return;
 
@@ -1033,8 +1118,7 @@ namespace
 	std::string const documentPath   = _selectedDocument->path();
 	NSString* const suggestedFolder  = [NSString stringWithCxxString:path::parent(documentPath)] ?: self.untitledSavePath;
 	NSString* const suggestedName    = [NSString stringWithCxxString:path::name(documentPath)]   ?: DefaultSaveNameForDocument(_selectedDocument);
-	encoding::type suggestedEncoding = _selectedDocument->encoding_for_save_as_path(to_s([suggestedFolder stringByAppendingPathComponent:suggestedName]));
-	[OakSavePanel showWithPath:suggestedName directory:suggestedFolder fowWindow:self.window encoding:suggestedEncoding completionHandler:^(NSString* path, encoding::type const& encoding){
+	[OakSavePanel showWithPath:suggestedName directory:suggestedFolder fowWindow:self.window encoding:_selectedDocument->disk_encoding() completionHandler:^(NSString* path, encoding::type const& encoding){
 		if(!path)
 			return;
 		_selectedDocument->set_path(to_s(path));
@@ -1094,7 +1178,7 @@ namespace
 	NSMutableArray* windows = [NSMutableArray array];
 
 	HTMLOutputWindowController* candidate = self.htmlOutputWindowController;
-	if(candidate && candidate.commandRunner->uuid() == anUUID && !candidate.needsNewWebView)
+	if(candidate && candidate.commandRunner->uuid() == anUUID && !candidate.needsNewWebView && candidate.window.isVisible)
 		[windows addObject:candidate];
 
 	for(NSWindow* window in [NSApp orderedWindows])
@@ -1185,7 +1269,7 @@ namespace
 
 - (void)updateWindowTitle
 {
-	if(_selectedDocument)
+	if(_selectedDocument && _documentDisplayName)
 	{
 		auto map = _selectedDocument->document_variables();
 		auto const& scm = _documentSCMVariables.empty() ? _projectSCMVariables : _documentSCMVariables;
@@ -1223,6 +1307,7 @@ namespace
 		{ "attr.project.lein",    "project.clj",    "build"   },
 		{ "attr.project.vagrant", "Vagrantfile",    "vagrant" },
 		{ "attr.project.jekyll",  "_config.yml",    "jekyll"  },
+		{ "attr.test.rspec",      ".rspec",         "test"    },
 	};
 
 	_externalScopeAttributes.clear();
@@ -1521,10 +1606,11 @@ namespace
 // = OakTabBarViewDataSource =
 // ===========================
 
-- (NSUInteger)numberOfRowsInTabBarView:(OakTabBarView*)aTabBarView                      { return _documents.size(); }
-- (NSString*)tabBarView:(OakTabBarView*)aTabBarView titleForIndex:(NSUInteger)anIndex   { return [NSString stringWithCxxString:_documents[anIndex]->display_name()]; }
-- (NSString*)tabBarView:(OakTabBarView*)aTabBarView pathForIndex:(NSUInteger)anIndex    { return [NSString stringWithCxxString:_documents[anIndex]->path()] ?: @""; }
-- (BOOL)tabBarView:(OakTabBarView*)aTabBarView isEditedAtIndex:(NSUInteger)anIndex      { return _documents[anIndex]->is_modified(); }
+- (NSUInteger)numberOfRowsInTabBarView:(OakTabBarView*)aTabBarView                         { return _documents.size(); }
+- (NSString*)tabBarView:(OakTabBarView*)aTabBarView titleForIndex:(NSUInteger)anIndex      { return [NSString stringWithCxxString:_documents[anIndex]->display_name()]; }
+- (NSString*)tabBarView:(OakTabBarView*)aTabBarView pathForIndex:(NSUInteger)anIndex       { return [NSString stringWithCxxString:_documents[anIndex]->path()] ?: @""; }
+- (NSString*)tabBarView:(OakTabBarView*)aTabBarView identifierForIndex:(NSUInteger)anIndex { return [NSString stringWithCxxString:_documents[anIndex]->identifier()]; }
+- (BOOL)tabBarView:(OakTabBarView*)aTabBarView isEditedAtIndex:(NSUInteger)anIndex         { return _documents[anIndex]->is_modified(); }
 
 // ==============================
 // = OakTabBarView Context Menu =
@@ -1574,6 +1660,8 @@ namespace
 		{
 			DocumentController* controller = [DocumentController new];
 			controller.documents = make_vector(documents[0]);
+			if(path::is_child(documents[0]->path(), to_s(self.projectPath)))
+				controller.defaultProjectPath = self.projectPath;
 			[controller openAndSelectDocument:documents[0]];
 			[controller showWindow:self];
 			[self closeTabsAtIndexes:indexSet askToSaveChanges:NO createDocumentIfEmpty:YES];
@@ -1684,7 +1772,7 @@ namespace
 - (BOOL)performTabDropFromTabBar:(OakTabBarView*)aTabBar atIndex:(NSUInteger)droppedIndex fromPasteboard:(NSPasteboard*)aPasteboard operation:(NSDragOperation)operation
 {
 	NSDictionary* plist = [aPasteboard propertyListForType:OakDocumentPboardType];
-	document::document_ptr srcDocument = document::find(to_s((NSString*)plist[@"document"]));
+	document::document_ptr srcDocument = document::find(to_s(plist[@"document"]));
 	if(!srcDocument)
 		return NO;
 
@@ -1700,7 +1788,7 @@ namespace
 			self.selectedTabIndex = iter - newDocuments.begin();
 	}
 
-	oak::uuid_t srcProjectId = to_s((NSString*)plist[@"collection"]);
+	oak::uuid_t srcProjectId = to_s(plist[@"collection"]);
 	if(operation == NSDragOperationMove && srcProjectId != to_s(self.identifier))
 	{
 		for(DocumentController* delegate in SortedControllers())
@@ -1766,12 +1854,15 @@ namespace
 			if(self.projectPath && !_fileBrowserHistory)
 				self.fileBrowser.url = [NSURL fileURLWithPath:self.projectPath];
 			[self updateFileBrowserStatus:self];
+			if(self.layoutView.tabsAboveDocument)
+				[self.tabBarView expand];
 		}
 
 		if(!makeVisibleFlag && [[self.window firstResponder] isKindOfClass:[NSView class]] && [(NSView*)[self.window firstResponder] isDescendantOf:self.layoutView.fileBrowserView])
 			[self makeTextViewFirstResponder:self];
 
-		self.layoutView.fileBrowserView = makeVisibleFlag ? self.fileBrowser.view : nil;
+		self.layoutView.fileBrowserView       = makeVisibleFlag ? self.fileBrowser.view : nil;
+		self.layoutView.fileBrowserHeaderView = makeVisibleFlag ? self.fileBrowser.headerView : nil;
 
 		if(makeVisibleFlag)
 		{
@@ -1967,7 +2058,7 @@ namespace
 	{
 		[aWindow layoutIfNeeded];
 		NSRect frame  = [aWindow frame];
-		NSRect parent = [_window convertRectToScreen:[_textView convertRect:[_textView visibleRect] toView:nil]];
+		NSRect parent = [self.window convertRectToScreen:[_textView convertRect:[_textView visibleRect] toView:nil]];
 
 		frame.origin.x = NSMinX(parent) + round((NSWidth(parent)  - NSWidth(frame))  * 1 / 4);
 		frame.origin.y = NSMinY(parent) + round((NSHeight(parent) - NSHeight(frame)) * 3 / 4);
@@ -1989,7 +2080,7 @@ namespace
 	find.projectIdentifier  = self.identifier;
 
 	NSInteger mode = [sender respondsToSelector:@selector(tag)] ? [sender tag] : find_tags::in_document;
-	if(mode == find_tags::in_document && [[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsFindInSelectionByDefault] && [self.window isKeyWindow] && self.textView.hasMultiLineSelection)
+	if(mode == find_tags::in_document && ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsAlwaysFindInDocument] && [self.window isKeyWindow] && self.textView.hasMultiLineSelection)
 		mode = find_tags::in_selection;
 
 	switch(mode)
@@ -2067,7 +2158,7 @@ namespace
 
 - (NSString*)untitledSavePath
 {
-	NSString* res = self.projectPath;
+	NSString* res = self.projectPath ?: [self.documentPath stringByDeletingLastPathComponent];
 	if(self.fileBrowserVisible)
 	{
 		NSArray* selectedURLs = self.fileBrowser.selectedURLs;
@@ -2368,24 +2459,42 @@ static NSUInteger DisableSessionSavingCount = 0;
 	BOOL res = NO;
 	++DisableSessionSavingCount;
 
+	NSWindow* keyWindow;
+
 	NSDictionary* session = [NSDictionary dictionaryWithContentsOfFile:[self sessionPath]];
 	for(NSDictionary* project in session[@"projects"])
 	{
 		DocumentController* controller = [DocumentController new];
 		[controller setupControllerForProject:project skipMissingFiles:NO];
+		if(controller.documents.empty())
+			continue;
+
 		if(NSString* windowFrame = project[@"windowFrame"])
 		{
 			if([windowFrame hasPrefix:@"{"]) // Legacy NSRect
 					[controller.window setFrame:NSRectFromString(windowFrame) display:NO];
 			else	[controller.window setFrameFromString:windowFrame];
 		}
-		[controller showWindow:nil];
+
 		if([project[@"miniaturized"] boolValue])
+		{
 			[controller.window miniaturize:nil];
-		else if([project[@"fullScreen"] boolValue])
-			[controller.window toggleFullScreen:self];
+		}
+		else
+		{
+			if([project[@"fullScreen"] boolValue])
+				[controller.window toggleFullScreen:self];
+			else if([project[@"zoomed"] boolValue])
+				[controller.window zoom:self];
+
+			[controller.window orderFront:self];
+			keyWindow = controller.window;
+		}
+
 		res = YES;
 	}
+
+	[keyWindow makeKeyWindow];
 
 	--DisableSessionSavingCount;
 	return res;
@@ -2448,8 +2557,11 @@ static NSUInteger DisableSessionSavingCount = 0;
 		res[@"fileBrowserState"] = history;
 
 	if(([self.window styleMask] & NSFullScreenWindowMask) == NSFullScreenWindowMask)
-			res[@"fullScreen"] = @YES;
-	else	res[@"windowFrame"] = [self.window stringWithSavedFrame];
+		res[@"fullScreen"] = @YES;
+	else if(self.window.isZoomed)
+		res[@"zoomed"] = @YES;
+	else
+		res[@"windowFrame"] = [self.window stringWithSavedFrame];
 
 	res[@"miniaturized"]       = @([self.window isMiniaturized]);
 	res[@"htmlOutputSize"]     = NSStringFromSize(self.htmlOutputSize);
@@ -2489,24 +2601,20 @@ static NSUInteger DisableSessionSavingCount = 0;
 	if(DisableSessionSavingCount)
 		return NO;
 
+	NSArray* controllers = SortedControllers();
+	if(controllers.count == 1)
+	{
+		DocumentController* controller = controllers.firstObject;
+		if(!controller.projectPath && !controller.fileBrowserVisible && controller.documents.size() == 1 && is_disposable(controller.selectedDocument))
+			controllers = nil;
+	}
+
 	NSMutableArray* projects = [NSMutableArray array];
-	for(DocumentController* controller in [SortedControllers() reverseObjectEnumerator])
+	for(DocumentController* controller in [controllers reverseObjectEnumerator])
 		[projects addObject:[controller sessionInfoIncludingUntitledDocuments:includeUntitled]];
 
 	NSDictionary* session = @{ @"projects" : projects };
 	return [session writeToFile:[self sessionPath] atomically:YES];
-}
-
-// ================================
-// = OakWindowFrameHelperDelegate =
-// ================================
-
-- (NSRect)savableWindowFrame
-{
-	NSRect res = [self.window frame];
-	if(self.fileBrowserVisible)
-		res.size.width -= self.fileBrowserWidth;
-	return res;
 }
 
 // ==========
@@ -2519,13 +2627,25 @@ static NSUInteger DisableSessionSavingCount = 0;
 	if(self.fileBrowser)
 		res = [self.fileBrowser variables];
 
-	auto const& vars = _documentSCMVariables.empty() ? _projectSCMVariables : _documentSCMVariables;
-	auto scmName = vars.find("TM_SCM_NAME");
-	auto scmBranch = vars.find("TM_SCM_BRANCH");
-	if(scmName != vars.end())
-		res["TM_SCM_NAME"] = scmName->second;
-	if(scmBranch != vars.end())
-		res["TM_SCM_BRANCH"] = scmBranch->second;
+	auto const& scmVars = _documentSCMVariables.empty() ? _projectSCMVariables : _documentSCMVariables;
+
+	if(!scmVars.empty())
+	{
+		auto scmName = scmVars.find("TM_SCM_NAME");
+		if(scmName != scmVars.end())
+			res["TM_SCM_NAME"] = scmName->second;
+	}
+	else
+	{
+		for(auto attr : _externalScopeAttributes)
+		{
+			if(regexp::match_t const& m = regexp::search("^attr.scm.(?'TM_SCM_NAME'\\w+)$", attr))
+			{
+				res.insert(m.captures().begin(), m.captures().end());
+				break;
+			}
+		}
+	}
 
 	if(NSString* projectDir = self.projectPath)
 	{
@@ -2566,7 +2686,7 @@ static NSUInteger DisableSessionSavingCount = 0;
 			{
 				__weak __block id observerId = [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidUnhideNotification object:NSApp queue:nil usingBlock:^(NSNotification*){
 					[aController showWindow:nil];
-					SetFrontProcessWithOptions(&(ProcessSerialNumber){ 0, kCurrentProcess }, kSetFrontProcessFrontWindowOnly);
+					[NSApp activateIgnoringOtherApps:YES];
 					[[NSNotificationCenter defaultCenter] removeObserver:observerId];
 				}];
 				[NSApp unhideWithoutActivation];
@@ -2574,7 +2694,7 @@ static NSUInteger DisableSessionSavingCount = 0;
 			else
 			{
 				[aController showWindow:nil];
-				SetFrontProcessWithOptions(&(ProcessSerialNumber){ 0, kCurrentProcess }, kSetFrontProcessFrontWindowOnly);
+				[NSApp activateIgnoringOtherApps:YES];
 			}
 		}
 
@@ -2697,7 +2817,7 @@ static NSUInteger DisableSessionSavingCount = 0;
 
 			for(DocumentController* candidate in SortedControllers())
 			{
-				if(folder == to_s(candidate.projectPath))
+				if(folder == to_s(candidate.projectPath ?: candidate.defaultProjectPath))
 					return bring_to_front(candidate);
 			}
 

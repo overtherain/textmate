@@ -4,7 +4,6 @@
 #import "OakScopeBarView.h"
 #import "OakUIConstructionFunctions.h"
 #import <OakFoundation/OakFoundation.h>
-#import <OakFoundation/NSArray Additions.h>
 #import <OakFoundation/NSString Additions.h>
 #import <ns/ns.h>
 
@@ -54,13 +53,20 @@
 @property (nonatomic) NSScrollView*         scrollView;
 @property (nonatomic) NSTableView*          tableView;
 @property (nonatomic) BOOL                  didFetchTableViewData;
-@property (nonatomic) OakPasteboardChooser* retainedSelf;
 @end
 
 static void* kOakPasteboardChooserSelectionBinding    = &kOakPasteboardChooserSelectionBinding;
 static void* kOakPasteboardChooserCurrentEntryBinding = &kOakPasteboardChooserCurrentEntryBinding;
 
+static NSMutableDictionary* SharedChoosers;
+
 @implementation OakPasteboardChooser
++ (instancetype)sharedChooserForName:(NSString*)aName
+{
+	SharedChoosers = SharedChoosers ?: [NSMutableDictionary new];
+	return [SharedChoosers objectForKey:aName] ?: [[OakPasteboardChooser alloc] initWithPasteboard:[OakPasteboard pasteboardWithName:aName]];
+}
+
 - (id)initWithPasteboard:(OakPasteboard*)aPasteboard
 {
 	if((self = [super init]))
@@ -148,11 +154,7 @@ static void* kOakPasteboardChooserCurrentEntryBinding = &kOakPasteboardChooserCu
 		};
 
 		NSView* contentView = self.window.contentView;
-		for(NSView* view in [views allValues])
-		{
-			[view setTranslatesAutoresizingMaskIntoConstraints:NO];
-			[contentView addSubview:view];
-		}
+		OakAddAutoLayoutViewsToSuperview([views allValues], contentView);
 
 		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|-(8)-[searchField(>=50)]-(8)-|"                      options:0 metrics:nil views:views]];
 		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[aboveScopeBarDark(==aboveScopeBarLight)]|"          options:0 metrics:nil views:views]];
@@ -189,7 +191,8 @@ static void* kOakPasteboardChooserCurrentEntryBinding = &kOakPasteboardChooserCu
 
 - (void)showWindow:(id)sender
 {
-	self.retainedSelf = self;
+	[SharedChoosers setObject:self forKey:_pasteboard.name];
+
 	[_searchField bind:NSValueBinding toObject:self withKeyPath:@"filterString" options:nil];
 	[_arrayController fetch:self];
 	[self performSelector:@selector(arrayControllerDidFinishInitialFetch:) withObject:nil afterDelay:0];
@@ -225,7 +228,7 @@ static void* kOakPasteboardChooserCurrentEntryBinding = &kOakPasteboardChooserCu
 - (void)windowWillClose:(NSNotification*)aNotification
 {
 	[_searchField unbind:NSValueBinding];
-	[self performSelector:@selector(setRetainedSelf:) withObject:nil afterDelay:0];
+	[SharedChoosers performSelector:@selector(removeObjectForKey:) withObject:_pasteboard.name afterDelay:0];
 }
 
 - (void)close
@@ -272,13 +275,13 @@ static void* kOakPasteboardChooserCurrentEntryBinding = &kOakPasteboardChooserCu
 
 - (void)tableView:(NSTableView*)aTableView willDisplayCell:(id)aCell forTableColumn:(NSTableColumn*)aTableColumn row:(NSInteger)rowIndex
 {
-	if([aCell isHighlighted] && [[aTableColumn identifier] isEqualToString:@"name"])
+	if([aCell backgroundStyle] == NSBackgroundStyleDark && [[aTableColumn identifier] isEqualToString:@"name"])
 	{
 		id obj = [aCell objectValue];
 		if([obj isKindOfClass:[NSAttributedString class]])
 		{
 			NSMutableAttributedString* str = [obj mutableCopy];
-			[str addAttribute:NSForegroundColorAttributeName value:[NSColor selectedTextColor] range:NSMakeRange(0, [str length])];
+			[str addAttribute:NSForegroundColorAttributeName value:[NSColor alternateSelectedControlTextColor] range:NSMakeRange(0, [str length])];
 			[aCell setAttributedStringValue:str];
 		}
 	}

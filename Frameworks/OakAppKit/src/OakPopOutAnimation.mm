@@ -1,5 +1,4 @@
 #import "OakPopOutAnimation.h"
-#import "NSImage Additions.h"
 #import <oak/algorithm.h>
 #import <oak/debug.h>
 
@@ -86,7 +85,7 @@ static double bounce_curve (double t)
 	CGFloat alpha = 1.0;
 	CGFloat grow  = 0.0;
 
-	double t = -[self.animationStartTime timeIntervalSinceNow];
+	double t = [[NSDate date] timeIntervalSinceDate:self.animationStartTime];
 	if(t > totalDuration)
 	{
 		[aTimer invalidate];
@@ -128,7 +127,7 @@ static double bounce_curve (double t)
 	[[NSColor whiteColor] set];
 	[roundedRect stroke];
 
-	[self.contentImage drawAdjustedInRect:NSInsetRect([self bounds], kExtendWidth, kExtendHeight) fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];
+	[self.contentImage drawInRect:NSInsetRect([self bounds], kExtendWidth, kExtendHeight) fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1 respectFlipped:YES hints:nil];
 
 	[super drawRect:aRect];
 }

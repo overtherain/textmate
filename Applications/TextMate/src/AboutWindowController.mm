@@ -62,12 +62,12 @@ static NSTextField* OakCreateTextField ()
 		self.window.title     = @"Add License";
 		self.window.delegate  = self;
 
-		self.ownerLabel       = OakCreateLabel(@"Owner:");
+		self.ownerLabel       = OakCreateLabel(@"Owner:", nil, NSRightTextAlignment);
 		self.ownerTextField   = OakCreateTextField();
-		self.licenseLabel     = OakCreateLabel(@"License:");
+		self.licenseLabel     = OakCreateLabel(@"License:", nil, NSRightTextAlignment);
 		self.licenseTextField = OakCreateTextField();
 		self.licenseTextField.font = [NSFont userFixedPitchFontOfSize:12];
-		self.statusTextField  = OakCreateSmallLabel();
+		self.statusTextField  = OakCreateLabel(@"", [NSFont labelFontOfSize:0]);
 		self.cancelButton     = OakCreateButton(@"Cancel");
 		self.registerButton   = OakCreateButton(@"Register");
 
@@ -80,12 +80,8 @@ static NSTextField* OakCreateTextField ()
 		self.registerButton.action = @selector(addLicense:);
 		self.cancelButton.action   = @selector(cancelOperation:);
 
-		NSView* keyViewLoop[] = { self.ownerTextField, self.licenseTextField, self.cancelButton, self.registerButton };
-		for(size_t i = 0; i < sizeofA(keyViewLoop); ++i)
-			keyViewLoop[i].nextKeyView = keyViewLoop[(i + 1) % sizeofA(keyViewLoop)];
-
-		self.window.initialFirstResponder = self.ownerTextField;
-		self.window.defaultButtonCell     = self.registerButton.cell;
+		OakSetupKeyViewLoop(@[ self.ownerTextField, self.licenseTextField, self.cancelButton, self.registerButton ]);
+		self.window.defaultButtonCell = self.registerButton.cell;
 
 		NSDictionary* views = @{
 			@"ownerLabel"   : self.ownerLabel,
@@ -98,11 +94,7 @@ static NSTextField* OakCreateTextField ()
 		};
 
 		NSView* contentView = self.window.contentView;
-		for(NSView* view in [views allValues])
-		{
-			[view setTranslatesAutoresizingMaskIntoConstraints:NO];
-			[contentView addSubview:view];
-		}
+		OakAddAutoLayoutViewsToSuperview([views allValues], contentView);
 
 		NSMutableArray* constraints = [NSMutableArray array];
 		CONSTRAINT(@"H:|-[ownerLabel(==licenseLabel)]-[owner(==license)]-|", NSLayoutFormatAlignAllBaseline);
@@ -437,10 +429,10 @@ static NSTextField* OakCreateTextField ()
 		return;
 	}
 
-	char key = '0';
+	char key = 0;
 	for(NSString* label in [self toolbarSelectableItemIdentifiers:self.toolbar])
 	{
-		NSMenuItem* item = [aMenu addItemWithTitle:label action:@selector(didClickToolbarItem:) keyEquivalent:key++ < '9' ? [NSString stringWithFormat:@"%c", key] : @""];
+		NSMenuItem* item = [aMenu addItemWithTitle:label action:@selector(didClickToolbarItem:) keyEquivalent:key < 9 ? [NSString stringWithFormat:@"%c", '0' + (++key % 10)] : @""];
 		[item setRepresentedObject:label];
 		[item setTarget:self];
 		[item setState:[label isEqualToString:[self.toolbar selectedItemIdentifier]] ? NSOnState : NSOffState];

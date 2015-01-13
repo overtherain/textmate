@@ -8,7 +8,6 @@
 #import <ns/ns.h>
 #import <network/network.h>
 #import <OakAppKit/OakAppKit.h>
-#import <OakFoundation/NSArray Additions.h>
 #import <OakFoundation/NSString Additions.h>
 #import <BundlesManager/BundlesManager.h>
 
@@ -94,7 +93,7 @@ static bool is_installed (oak::uuid_t const& uuid)
 	all = installed;
 
 	// Exclude uninstalled grammars when offline
-	if(network::can_reach_host([[[NSURL URLWithString:[NSString stringWithUTF8String:REST_API]] host] UTF8String]))
+	if(network::can_reach_host([[[NSURL URLWithString:@(REST_API)] host] UTF8String]))
 	{
 		for(auto const& bundle : bundles_db::index())
 		{
@@ -138,7 +137,7 @@ static bool is_installed (oak::uuid_t const& uuid)
 
 	std::map<std::string, std::string> variables;
 	variables["DisplayName"] = path::display_name(to_s(self.path));
-	std::string const ext = path::extensions(to_s(self.path));;
+	std::string const ext = path::extensions(to_s(self.path));
 	if(ext != "")
 	{
 		self.persistentSetting = YES;
@@ -191,9 +190,9 @@ static bool is_installed (oak::uuid_t const& uuid)
 			return aCompletionHandler(nil);
 
 		NSDictionary* grammar = self.grammar;
-		std::string scope      = to_s((NSString*)[grammar objectForKey:@"scope"]);
-		oak::uuid_t uuid       = to_s((NSString*)[grammar objectForKey:@"uuid"]);
-		oak::uuid_t bundleUUID = to_s((NSString*)[grammar objectForKey:@"bundleUUID"]);
+		std::string scope      = to_s([grammar objectForKey:@"scope"]);
+		oak::uuid_t uuid       = to_s([grammar objectForKey:@"uuid"]);
+		oak::uuid_t bundleUUID = to_s([grammar objectForKey:@"bundleUUID"]);
 
 		if(is_installed(uuid))
 		{
@@ -208,7 +207,7 @@ static bool is_installed (oak::uuid_t const& uuid)
 			{
 				[installingBundleActivityTextField bind:NSValueBinding toObject:[BundlesManager sharedInstance] withKeyPath:@"activityText" options:nil];
 				[installingBundleProgressIndicator bind:NSValueBinding toObject:[BundlesManager sharedInstance] withKeyPath:@"progress" options:nil];
-				[installingBundleProgressIndicator bind:NSIsIndeterminateBinding toObject:[BundlesManager sharedInstance] withKeyPath:@"determinateProgress" options:@{ NSValueTransformerNameBindingOption: @"NSNegateBoolean" }];
+				[installingBundleProgressIndicator bind:NSIsIndeterminateBinding toObject:[BundlesManager sharedInstance] withKeyPath:@"determinateProgress" options:@{ NSValueTransformerNameBindingOption: NSNegateBooleanTransformerName }];
 				[installingBundleProgressIndicator startAnimation:self];
 
 				OakShowSheetForWindow(installingBundleWindow, aWindow, ^(NSInteger returnCode){ });

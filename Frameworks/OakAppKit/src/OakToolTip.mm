@@ -4,29 +4,7 @@
 
 OAK_DEBUG_VAR(OakToolTip);
 
-void OakShowToolTip (NSString* msg, NSPoint location)
-{
-	if(msg)
-	{
-		OakToolTip* toolTip = [OakToolTip new];
-		[toolTip setStringValue:msg];
-
-		// Find the screen which we are displaying on
-		NSScreen* screen = nil;
-		for(NSScreen* candidate in [NSScreen screens])
-		{
-			if(NSPointInRect(location, [candidate frame]))
-			{
-				screen = candidate;
-				break;
-			}
-		}
-
-		[toolTip showAtLocation:location forScreen:screen];
-	}
-}
-
-@interface OakToolTip ()
+@interface OakToolTip : NSWindow
 {
 	OBJC_WATCH_LEAKS(OakToolTip);
 
@@ -34,12 +12,14 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 
 	NSDate* didOpenAtDate; // ignore mouse moves for the next second
 	NSPoint mousePositionWhenOpened;
-	BOOL enforceMouseThreshold;
 }
-@property (nonatomic) NSTimer* animationTimer;
-@property (nonatomic) NSDate* animationStart;
-- (void)stopAnimation:(id)anArgument;
+@property (nonatomic) BOOL enforceMouseThreshold;
+- (void)setFont:(NSFont*)aFont;
+- (void)setStringValue:(NSString*)aString;
+- (void)showAtLocation:(NSPoint)aPoint forScreen:(NSScreen*)aScreen;
 @end
+
+static __unsafe_unretained OakToolTip* LastToolTip;
 
 @implementation OakToolTip
 + (void)initialize
@@ -71,12 +51,13 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 		[field setBordered:NO];
 		[field setDrawsBackground:NO];
 		[field setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+		[field setFont:[NSFont toolTipsFontOfSize:0]];
 		[field setStringValue:@"This is a nice little code block"];
 
 		[self setContentView:field];
 		[self setFrame:[self frameRectForContentRect:[field frame]] display:NO];
 
-		enforceMouseThreshold = YES;
+		self.enforceMouseThreshold = YES;
 	}
 	return self;
 }
@@ -84,6 +65,7 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 - (void)dealloc
 {
 	D(DBF_OakToolTip, bug("\n"););
+	LastToolTip = nil;
 }
 
 - (void)setFont:(NSFont*)aFont
@@ -99,11 +81,6 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 	[field setStringValue:aString];
 }
 
-- (void)setEnforceMouseThreshold:(BOOL)flag
-{
-	enforceMouseThreshold = flag;
-}
-
 - (BOOL)canBecomeKeyWindow
 {
 	return YES;
@@ -111,11 +88,11 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 
 - (BOOL)shouldCloseForMousePosition:(NSPoint)aPoint
 {
-	if(!enforceMouseThreshold)
+	if(!_enforceMouseThreshold)
 		return YES;
 
 	CGFloat ignorePeriod = [[NSUserDefaults standardUserDefaults] floatForKey:@"OakToolTipMouseMoveIgnorePeriod"];
-	if(-[didOpenAtDate timeIntervalSinceNow] < ignorePeriod)
+	if([[NSDate date] timeIntervalSinceDate:didOpenAtDate] < ignorePeriod)
 		return NO;
 
 	if(NSEqualPoints(mousePositionWhenOpened, NSZeroPoint))
@@ -142,7 +119,6 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 
 - (void)showUntilUserActivityDelayed:(id)sender
 {
-	OakToolTip* retainedSelf = self;
 	[self orderFront:self];
 
 	didOpenAtDate = [NSDate date];
@@ -158,6 +134,7 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 	BOOL didAcceptMouseMovedEvents = [keyWindow acceptsMouseMovedEvents];
 	[keyWindow setAcceptsMouseMovedEvents:YES];
 
+	BOOL slowFadeOut = NO;
 	while(NSEvent* event = [NSApp nextEventMatchingMask:NSAnyEventMask untilDate:[NSDate distantFuture] inMode:NSDefaultRunLoopMode dequeue:YES])
 	{
 		[NSApp sendEvent:event];
@@ -172,6 +149,7 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 		if([event type] == NSMouseMoved && [self shouldCloseForMousePosition:[NSEvent mouseLocation]])
 		{
 			D(DBF_OakToolTip, bug("close because mouse was moved\n"););
+			slowFadeOut = YES;
 			break;
 		}
 
@@ -183,15 +161,13 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 	}
 
 	[keyWindow setAcceptsMouseMovedEvents:didAcceptMouseMovedEvents];
-	[retainedSelf orderOut:nil];
+	[self fadeOutSlowly:slowFadeOut];
 }
 
 - (void)showAtLocation:(NSPoint)aPoint forScreen:(NSScreen*)aScreen
 {
 	D(DBF_OakToolTip, bug("%s\n", [NSStringFromPoint(aPoint) UTF8String]););
 	aScreen = aScreen ?: [NSScreen mainScreen];
-
-	[self stopAnimation:self];
 
 	[field sizeToFit];
 	NSRect r = [aScreen visibleFrame];
@@ -207,38 +183,51 @@ void OakShowToolTip (NSString* msg, NSPoint location)
 	[self showUntilUserActivity];
 }
 
-- (void)orderOut:(id)sender
+- (void)fadeOutSlowly:(BOOL)slowly
 {
-	if(![self isVisible] || self.animationTimer)
-		return;
+	[NSAnimationContext beginGrouping];
 
-	[self stopAnimation:self];
-	self.animationStart = [NSDate date];
-	self.animationTimer = [NSTimer scheduledTimerWithTimeInterval:0.02 target:self selector:@selector(animationTick:) userInfo:nil repeats:YES];
-}
+	[NSAnimationContext currentContext].duration = slowly ? 0.5 : 0.25;
+	[NSAnimationContext currentContext].completionHandler = ^{
+		[self orderOut:self];
+	};
 
-- (void)animationTick:(id)sender
-{
-	CGFloat alpha = 0.97 * (1 - oak::slow_in_out(-1.5 * [self.animationStart timeIntervalSinceNow]));
-	if(alpha > 0)
-	{
-		[self setAlphaValue:alpha];
-	}
-	else
-	{
-		[super orderOut:self];
-		[self stopAnimation:self];
-	}
-}
+	CABasicAnimation* anim = [CABasicAnimation animation];
+	anim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseIn];
+	self.animations = @{ @"alphaValue" : anim };
 
-- (void)stopAnimation:(id)sender
-{
-	if(self.animationTimer)
-	{
-		OakToolTip* retainedSelf = self;
-		[retainedSelf setAlphaValue:0.97];
-		[retainedSelf.animationTimer invalidate];
-		retainedSelf.animationTimer = nil;
-	}
+	[self.animator setAlphaValue:0];
+
+	[NSAnimationContext endGrouping];
 }
 @end
+
+// ==============
+// = Public API =
+// ==============
+
+void OakShowToolTip (NSString* msg, NSPoint location)
+{
+	if(msg)
+	{
+		OakToolTip* toolTip = [OakToolTip new];
+		[toolTip setStringValue:msg];
+
+		// Find the screen which we are displaying on
+		NSScreen* screen = nil;
+		for(NSScreen* candidate in [NSScreen screens])
+		{
+			if(NSPointInRect(location, [candidate frame]))
+			{
+				screen = candidate;
+				break;
+			}
+		}
+
+		[toolTip showAtLocation:location forScreen:screen];
+
+		if(OakToolTip* lastToolTip = LastToolTip)
+			[lastToolTip performSelector:@selector(orderOut:) withObject:nil afterDelay:0];
+		LastToolTip = toolTip;
+	}
+}

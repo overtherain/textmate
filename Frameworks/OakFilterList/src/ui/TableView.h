@@ -1,3 +1,3 @@
-@interface OakInactiveTableView : NSTableView
-@property (nonatomic, weak) NSTextField* linkedTextField;
+@interface OakInactiveTableRowView : NSTableRowView
+@property (nonatomic) BOOL drawAsHighlighted;
 @end
