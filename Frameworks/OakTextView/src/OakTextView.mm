@@ -629,6 +629,15 @@ static std::string shell_quote (std::vector<std::string> paths)
 	}
 }
 
+- (void)updateDocumentMetadata
+{
+	if(document && layout)
+	{
+		document->set_folded(layout->folded_as_string());
+		document->set_visible_index(layout->index_at_point([self visibleRect].origin));
+	}
+}
+
 - (void)setDocument:(document::document_ptr const&)aDocument
 {
 	if(document && aDocument && *document == *aDocument)
@@ -649,10 +658,9 @@ static std::string shell_quote (std::vector<std::string> paths)
 
 	if(editor)
 	{
-		document->buffer().remove_callback(callback);
-		document->set_folded(layout->folded_as_string());
-		document->set_visible_index(layout->index_at_point([self visibleRect].origin));
+		[self updateDocumentMetadata];
 
+		document->buffer().remove_callback(callback);
 		delete callback;
 		callback = NULL;
 
@@ -768,11 +776,7 @@ static std::string shell_quote (std::vector<std::string> paths)
 	for(auto const& item : bundles::query(bundles::kFieldSemanticClass, "callback.document.will-save", [self scopeContext], bundles::kItemTypeMost, oak::uuid_t(), false))
 		[self performBundleItem:item];
 
-	if(document && layout)
-	{
-		document->set_folded(layout->folded_as_string());
-		document->set_visible_index(layout->index_at_point([self visibleRect].origin));
-	}
+	[self updateDocumentMetadata];
 }
 
 - (void)documentDidSave:(NSNotification*)aNotification
@@ -2012,7 +2016,7 @@ static void update_menu_key_equivalents (NSMenu* menu, std::multimap<std::string
 	}
 
 	std::string const str = to_s(aString);
-	[self recordSelector:_cmd withArgument:[NSString stringWithCxxString:str]];
+	[self recordSelector:@selector(insertText:) withArgument:[NSString stringWithCxxString:str]];
 	bool autoPairing = !macroRecordingArray && ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableTypingPairsKey];
 	editor->insert_with_pairing(str, [self indentCorrections], autoPairing, to_s([self scopeAttributes]));
 }
@@ -2514,12 +2518,19 @@ static void update_menu_key_equivalents (NSMenu* menu, std::multimap<std::string
 	else	[self setShowLiveSearch:YES];
 }
 
+- (find::options_t)incrementalSearchOptions
+{
+	BOOL ignoreCase = self.liveSearchView.ignoreCaseCheckBox.state == NSOnState;
+	BOOL wrapAround = self.liveSearchView.wrapAroundCheckBox.state == NSOnState;
+	return (ignoreCase ? find::ignore_case : find::none) | (wrapAround ? find::wrap_around : find::none) | find::ignore_whitespace;
+}
+
 - (IBAction)findNext:(id)sender
 {
 	if(self.liveSearchView)
 	{
 		ng::ranges_t tmp;
-		for(auto const& pair : ng::find(document->buffer(), ng::move(document->buffer(), liveSearchRanges.empty() ? liveSearchAnchor : liveSearchRanges, kSelectionMoveToEndOfSelection), to_s(liveSearchString), find::ignore_case|find::ignore_whitespace))
+		for(auto const& pair : ng::find(document->buffer(), ng::move(document->buffer(), liveSearchRanges.empty() ? liveSearchAnchor : liveSearchRanges, kSelectionMoveToEndOfSelection), to_s(liveSearchString), self.incrementalSearchOptions))
 			tmp.push_back(pair.first);
 		[self setLiveSearchRanges:tmp];
 		if(!tmp.empty())
@@ -2536,7 +2547,7 @@ static void update_menu_key_equivalents (NSMenu* menu, std::multimap<std::string
 	if(self.liveSearchView)
 	{
 		ng::ranges_t tmp;
-		for(auto const& pair : ng::find(document->buffer(), ng::move(document->buffer(), liveSearchRanges.empty() ? liveSearchAnchor : liveSearchRanges, kSelectionMoveToBeginOfSelection), to_s(liveSearchString), find::backwards|find::ignore_case|find::ignore_whitespace))
+		for(auto const& pair : ng::find(document->buffer(), ng::move(document->buffer(), liveSearchRanges.empty() ? liveSearchAnchor : liveSearchRanges, kSelectionMoveToBeginOfSelection), to_s(liveSearchString), find::backwards|self.incrementalSearchOptions))
 			tmp.push_back(pair.first);
 		[self setLiveSearchRanges:tmp];
 		if(!tmp.empty())

@@ -279,8 +279,8 @@ static NSString* const OakTabItemPasteboardType = @"OakTabItemPasteboardType";
 {
 	NSUInteger countOfTabs = [anIndexSet count];
 
-	CGFloat spacing = OakTabBarStyle.sharedInstance.tabViewSpacing;
-	CGFloat width   = NSWidth(aRect) - spacing * (countOfTabs-1);
+	CGFloat const spacing = OakTabBarStyle.sharedInstance.tabViewSpacing;
+	CGFloat width = NSWidth(aRect) - spacing * (countOfTabs-1);
 
 	CGFloat totalSurplus = 0;
 	CGFloat totalDeficit = 0;
@@ -439,7 +439,7 @@ static NSString* const OakTabItemPasteboardType = @"OakTabItemPasteboardType";
 	if(_didCloseTabIndex)
 	{
 		NSRect leftRect, rightRect;
-		NSDivideRect(bounds, &leftRect, &rightRect, NSMinX(_didCloseTabFrame), NSMinXEdge);
+		NSDivideRect(bounds, &leftRect, &rightRect, NSMinX(_didCloseTabFrame) - leftPadding, NSMinXEdge);
 
 		NSIndexSet* rightSet = [tabIndexes indexesInRange:NSMakeRange(_didCloseTabIndex, [tabIndexes lastIndex]) options:0 passingTest:^(NSUInteger idx, BOOL* stop){ return YES; }];
 		rightRect.size.width = MIN((NSWidth(_didCloseTabFrame) + tabSpacing) * [rightSet count] - tabSpacing, NSWidth(rightRect));
